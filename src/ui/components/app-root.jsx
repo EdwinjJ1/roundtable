@@ -1900,10 +1900,18 @@ function buildLocalScene(baseScene, liveTurns, agents) {
     roleCursor[target] = index + 1;
     return candidates[index % candidates.length];
   };
+  // Per-task status from the backend's workflowRun.stageStates, so dependency
+  // arrows on the table appear as each task finishes — not all at once.
+  const stageStates = result?.workflowRun?.stageStates || {};
+  const stageToTaskStatus = { done: 'completed', failed: 'failed', blocked: 'blocked', running: 'running', pending: 'pending' };
   const liveTasks = result?.plan?.tasks?.map((task) => {
     const owner = ownerFor(task);
-    status[owner.agentId] = completed || result?.dispatchStatus === 'running' ? 'done' : 'idle';
-    return { ...task, owner: owner.agentId, status: completed ? 'completed' : result?.dispatchStatus === 'running' ? 'running' : 'pending' };
+    const stageStatus = stageStates[task.id]?.status;
+    const taskStatus = stageStatus
+      ? (stageToTaskStatus[stageStatus] || 'pending')
+      : (completed ? 'completed' : result?.dispatchStatus === 'running' ? 'running' : 'pending');
+    status[owner.agentId] = taskStatus === 'completed' ? 'done' : taskStatus === 'running' ? 'working' : 'idle';
+    return { ...task, owner: owner.agentId, status: taskStatus };
   }) || [];
 
   return {
