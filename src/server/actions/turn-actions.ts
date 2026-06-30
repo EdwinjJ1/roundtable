@@ -19,6 +19,7 @@ import { applyAnswers, assessClarity } from './clarify-actions.js';
 import { runAgentTask, normalizeAdapter } from './agent-runner.js';
 import { E2BUnavailableError } from './adapters/e2b-adapter.js';
 import { MiniMaxUnavailableError } from './adapters/minimax-adapter.js';
+import { OpenAICompatUnavailableError } from './adapters/openai-compat-adapter.js';
 import {
   runScheduler,
   type ScheduledTask,
@@ -39,6 +40,10 @@ export type ApprovalInput = {
   decision: 'approve' | 'reject';
   autoDispatch?: boolean | undefined;
   agentAdapter?: string | undefined;
+  // When true, kick off dispatch in the background and return immediately with
+  // dispatchStatus 'running' — the client then polls /history for live progress.
+  // When false/omitted, await the full run (used by tests and the CLI).
+  background?: boolean | undefined;
 };
 
 export type DispatchInput = {
@@ -119,17 +124,19 @@ function buildTurn(opts: {
     model: 'agent-chain-v1',
     pmMessage: parked
       ? 'I need a couple of details before I plan this.'
-      : `Starting ${plan.tasks.length} agent step${plan.tasks.length === 1 ? '' : 's'}.`,
+      : `Plan ready — ${plan.tasks.length} agent step${plan.tasks.length === 1 ? '' : 's'}. Review and start when you're ready.`,
     needsClarification: parked,
     clarifyQuestions: opts.clarifyQuestions ?? [],
     clarifyAnswers: opts.clarifyAnswers ?? [],
-    needsApproval: false,
-    approvalStatus: 'approved',
-    approvedAt: now,
+    // The plan must be reviewed and approved by the user before any agent runs.
+    // A parked (clarifying) turn has no plan yet, so it isn't pending approval.
+    needsApproval: !parked,
+    approvalStatus: parked ? 'approved' : 'pending',
+    approvedAt: parked ? now : null,
     dispatchStatus: 'not_started',
     dispatchAdapter: null,
     dispatchedAt: null,
-    dispatchStage: parked ? 'clarifying' : 'queued',
+    dispatchStage: parked ? 'clarifying' : 'awaiting_approval',
     dispatchError: null,
     dispatchWorkspacePath: null,
     dispatch: [],
@@ -214,6 +221,26 @@ export async function approveTurn(input: ApprovalInput): Promise<DispatchRespons
   }));
   const next = requireTurn(approved);
   if (input.autoDispatch) {
+    if (input.background) {
+      // Mark running now, run the DAG in the background, and return immediately.
+      // The client polls /history; per-task stageStates stream in as agents work.
+      const running = await updateTurn(next.id, (current) => ({
+        ...current,
+        dispatchStatus: 'running',
+        dispatchStage: 'dispatch',
+        dispatchError: null,
+      }));
+      void dispatchTurn({ turnId: next.id, agentAdapter: input.agentAdapter }).catch(async (error) => {
+        const message = error instanceof Error ? error.message : 'dispatch_failed';
+        await updateTurn(next.id, (current) => ({
+          ...current,
+          dispatchStatus: 'failed',
+          dispatchStage: 'failed',
+          dispatchError: message,
+        })).catch(() => {});
+      });
+      return dispatchResponse(requireTurn(running));
+    }
     return dispatchTurn({ turnId: next.id, agentAdapter: input.agentAdapter });
   }
   return dispatchResponse(next);
@@ -253,10 +280,15 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     try {
       result = await runAgentTask({ adapter, workspace, task, message: turn.message, handoffContext });
     } catch (error) {
-      // Opt-in adapter unavailable (E2B / MiniMax): fall back to local-dispatch in
-      // this layer (not silently inside the adapter). The fallback is surfaced as
-      // an event on the task so a misconfig is visible in the UI, not hidden.
-      if (error instanceof E2BUnavailableError || error instanceof MiniMaxUnavailableError) {
+      // Opt-in adapter unavailable (E2B / MiniMax / OpenAI-compatible): fall back
+      // to local-dispatch in this layer (not silently inside the adapter). The
+      // fallback is surfaced as an event on the task so a misconfig is visible
+      // in the UI, not hidden.
+      if (
+        error instanceof E2BUnavailableError
+        || error instanceof MiniMaxUnavailableError
+        || error instanceof OpenAICompatUnavailableError
+      ) {
         fallbackNote = {
           type: 'thinking_delta',
           delta: `${error.name} (${error.message}); fell back to local-dispatch.`,
@@ -283,7 +315,32 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
       }
     }
 
+    // The plan is now defined: once the planner finishes, the downstream tasks
+    // are no longer "awaiting plan" — give them concrete titles so the UI stops
+    // showing three placeholder rows that all looked the same.
+    if (task.role === 'planner') {
+      await retitleDownstreamTasks(turn.id, task.id, turn.message);
+    }
+
     return { ok: true, output: { summary: result.text, artifactId: artifactByTask.get(task.id)?.id } };
+  };
+
+  // Stream per-task progress into the turn's workflowRun.stageStates as each
+  // agent starts/finishes, so the polling UI can animate the roundtable (who's
+  // working right now) instead of jumping straight from "queued" to "done".
+  const schedulerToStage = { running: 'running', completed: 'done', failed: 'failed', blocked: 'blocked' } as const;
+  const onTaskState = async (taskId: string, status: 'running' | 'completed' | 'failed' | 'blocked') => {
+    await updateTurn(turn.id, (current) => ({
+      ...current,
+      dispatchStage: status === 'running' ? `running:${taskId}` : current.dispatchStage,
+      workflowRun: {
+        ...(current.workflowRun ?? { stageStates: {} }),
+        stageStates: {
+          ...(current.workflowRun?.stageStates ?? {}),
+          [taskId]: { status: schedulerToStage[status] },
+        },
+      },
+    }));
   };
 
   const run = await runScheduler({
@@ -292,6 +349,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     maxFixRounds: maxFixRounds(),
     now: nowIso,
     onFailure: (failed, error) => makeFixerTask(failed, error),
+    onTaskState,
   });
 
   // Assemble DispatchRecords from scheduler records, enriching with the captured
@@ -513,6 +571,55 @@ function taskForAgent(
   };
 }
 
+// Concrete title for a downstream task AFTER the planner has run. At this point
+// the plan defines the work, so naming the goal is accurate (not a guess). Used
+// by retitleDownstreamTasks() to replace the "awaiting plan" placeholders.
+function plannedTitleForRole(role: string | undefined, displayName: string, goal: string): string {
+  if (role === 'pm') return `Product brief for ${goal}`;
+  if (role === 'architect') return `Architecture for ${goal}`;
+  if (role === 'implementer') return `Build ${goal} (${displayName})`;
+  if (role === 'reviewer') return `Review ${goal}`;
+  if (role === 'fixer') return `Fix issues for ${goal}`;
+  return `Plan ${goal}`;
+}
+
+// Once the planner task completes, rewrite every task that (transitively)
+// depends on it from its placeholder title to a concrete one. The plan now
+// exists, so the downstream tasks have a real, named scope.
+async function retitleDownstreamTasks(turnId: string, plannerTaskId: string, message: string): Promise<void> {
+  const goal = compactTitle(messageWithoutMentions(message) || message);
+  await updateTurn(turnId, (current) => {
+    const tasks = current.plan.tasks;
+    // Build the set of tasks reachable from the planner via deps.
+    const downstream = new Set<string>();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const task of tasks) {
+        if (downstream.has(task.id)) continue;
+        if (task.deps.includes(plannerTaskId) || task.deps.some((dep) => downstream.has(dep))) {
+          downstream.add(task.id);
+          changed = true;
+        }
+      }
+    }
+    if (downstream.size === 0) return current;
+    const ownerName = (task: PlanTask): string =>
+      AGENT_ROSTER.find((agent) => agent.id === task.owner)?.displayName ?? task.owner ?? task.role ?? 'agent';
+    return {
+      ...current,
+      plan: {
+        ...current.plan,
+        tasks: tasks.map((task) =>
+          downstream.has(task.id)
+            ? { ...task, title: plannedTitleForRole(task.role, ownerName(task), goal) }
+            : task,
+        ),
+      },
+    };
+  });
+}
+
 function planner(): AgentProfile {
   return AGENT_ROSTER.find((agent) => agent.role === 'planner') ?? AGENT_ROSTER[0]!;
 }
@@ -530,12 +637,18 @@ function implementerForMessage(message: string): AgentProfile {
     ?? planner();
 }
 
+// Title for a task at PLAN TIME — before the planner has run. Only the planner
+// itself knows the concrete goal up front; every downstream task is still
+// undefined (its real scope is decided once the plan lands), so we show a
+// responsibility placeholder, NOT the user's raw request. dispatchTurn() later
+// rewrites these from the planner's actual output via retitleDownstreamTasks().
 function titleForAgent(agent: AgentProfile, base: string): string {
-  if (agent.role === 'pm') return `Define product brief for ${base}`;
-  if (agent.role === 'architect') return `Design architecture for ${base}`;
-  if (agent.role === 'implementer') return `Build ${base} (${agent.displayName})`;
-  if (agent.role === 'reviewer') return `Review ${base}`;
-  if (agent.role === 'fixer') return `Fix issues for ${base}`;
+  if (agent.role === 'planner') return `Plan ${base}`;
+  if (agent.role === 'pm') return 'Product brief · awaiting plan';
+  if (agent.role === 'architect') return 'Architecture · awaiting plan';
+  if (agent.role === 'implementer') return `Build · awaiting plan (${agent.displayName})`;
+  if (agent.role === 'reviewer') return 'Review · awaits the build';
+  if (agent.role === 'fixer') return 'Fix issues · awaits review';
   return `Plan ${base}`;
 }
 
@@ -696,7 +809,22 @@ function upsertArtifacts(target: Artifact[], artifacts: Artifact[]): void {
 }
 
 function compactTitle(message: string): string {
-  return message.replace(/\s+/g, ' ').trim().slice(0, 120) || 'Roundtable task';
+  // Titles should read as the core ask, not the whole enriched goal. Drop the
+  // clarification block appended by applyAnswers() ("...\n\nClarified
+  // requirements:\n- ...") so Plan/Build/Review titles don't all repeat the same
+  // long string. The full enriched text still lives in each task's brief.
+  const core = stripClarification(message);
+  return core.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Roundtable task';
+}
+
+// Mirror of applyAnswers()'s appended block ("\n\nClarified requirements:\n…").
+// Whitespace-tolerant: by the time a title is built the goal may have had its
+// newlines collapsed to single spaces, so match either form. Keep the marker
+// text in sync with clarify-actions.ts applyAnswers().
+const CLARIFICATION_MARKER = /\s*Clarified requirements:[\s\S]*$/;
+
+function stripClarification(message: string): string {
+  return message.replace(CLARIFICATION_MARKER, '');
 }
 
 export class ActionError extends Error {
