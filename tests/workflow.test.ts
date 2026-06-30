@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createChat, createMessage } from '../src/server/actions/chat-actions.js';
 import { normalizeAdapter } from '../src/server/actions/agent-runner.js';
-import { answerClarification, approveTurn, createTurn, listTurns } from '../src/server/actions/turn-actions.js';
+import { answerClarification, approveTurn, createTurn, listTurns, reviewSeverities } from '../src/server/actions/turn-actions.js';
 import { createWorkbench } from '../src/server/actions/workbench-actions.js';
 import { resetData } from '../src/server/store.js';
 import type { Actor } from '../src/server/types.js';
@@ -160,6 +160,20 @@ describe('Roundtable clean workflow', () => {
     expect(turn.plan.tasks[0]?.owner).toBe('atlas');
     expect(turn.plan.tasks[0]?.assignee).toBe('@atlas');
     expect(turn.approvalStatus).toBe('pending');
+  });
+
+  it('detects blocking review findings (so a review triggers a fix) and passes a clean review', () => {
+    const bad = reviewSeverities('### 🔴 Critical\n1. images broken\n### 🟠 High\n- slow load');
+    expect(bad.blocking).toBeGreaterThan(0);
+
+    const badZh = reviewSeverities('## 严重问题\n- 图片无法显示（致命）');
+    expect(badZh.blocking).toBeGreaterThan(0);
+
+    const clean = reviewSeverities('Looks good — no blockers, ready to ship.');
+    expect(clean.blocking).toBe(0);
+
+    const cleanZh = reviewSeverities('整体没有问题，可以直接交付。');
+    expect(cleanZh.blocking).toBe(0);
   });
 
   it('defaults unmentioned backend work to planning, backend implementation, and review', async () => {

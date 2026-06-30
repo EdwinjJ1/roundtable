@@ -1,5 +1,5 @@
-import { mkdir } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdir, rm } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { id, mutateData, nowIso, readData } from '../store.js';
 import type {
   Actor,
@@ -322,25 +322,53 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
       await retitleDownstreamTasks(turn.id, task.id, turn.message);
     }
 
+    // Review gate: a reviewer that reports blocking (Critical/High) issues should
+    // trigger a fix, not silently end the run. Treat such a review as a failure
+    // so the scheduler derives a fixer via onFailure (bounded by maxFixRounds);
+    // the fixer receives this review as its repair context. A clean review passes.
+    if (task.role === 'reviewer' && reviewRequestsFix()) {
+      const severities = reviewSeverities(result.text);
+      if (severities.blocking > 0) {
+        return {
+          ok: false,
+          error: { message: `review_found_issues: ${severities.label}`, review: result.text },
+        };
+      }
+    }
+
     return { ok: true, output: { summary: result.text, artifactId: artifactByTask.get(task.id)?.id } };
   };
+
+  // Fixer tasks the scheduler derives at runtime, keyed by id, so onTaskState can
+  // fold them into the persisted plan as they start (the UI reads plan.tasks).
+  const derivedById = new Map<string, PlanTask>();
 
   // Stream per-task progress into the turn's workflowRun.stageStates as each
   // agent starts/finishes, so the polling UI can animate the roundtable (who's
   // working right now) instead of jumping straight from "queued" to "done".
+  // onTaskState is awaited sequentially by the scheduler, so its store write does
+  // not race the final updateTurn (which only runs after the scheduler returns).
   const schedulerToStage = { running: 'running', completed: 'done', failed: 'failed', blocked: 'blocked' } as const;
   const onTaskState = async (taskId: string, status: 'running' | 'completed' | 'failed' | 'blocked') => {
-    await updateTurn(turn.id, (current) => ({
-      ...current,
-      dispatchStage: status === 'running' ? `running:${taskId}` : current.dispatchStage,
-      workflowRun: {
-        ...(current.workflowRun ?? { stageStates: {} }),
-        stageStates: {
-          ...(current.workflowRun?.stageStates ?? {}),
-          [taskId]: { status: schedulerToStage[status] },
+    const derived = derivedById.get(taskId);
+    await updateTurn(turn.id, (current) => {
+      const planHasTask = current.plan.tasks.some((task) => task.id === taskId);
+      const tasks = derived && !planHasTask
+        ? [...current.plan.tasks, derived]
+        : current.plan.tasks;
+      return {
+        ...current,
+        plan: { ...current.plan, tasks },
+        dispatchStage: status === 'running' ? `running:${taskId}` : current.dispatchStage,
+        workflowRun: {
+          ...(current.workflowRun ?? { stageStates: {} }),
+          stageStates: {
+            ...(current.workflowRun?.stageStates ?? {}),
+            [taskId]: { status: schedulerToStage[status] },
+          },
         },
-      },
-    }));
+      };
+    });
   };
 
   const run = await runScheduler({
@@ -348,7 +376,13 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     runTask,
     maxFixRounds: maxFixRounds(),
     now: nowIso,
-    onFailure: (failed, error) => makeFixerTask(failed, error),
+    onFailure: (failed, error) => {
+      const fixer = makeFixerTask(failed, error);
+      // Remember it so onTaskState can add it to the persisted plan when it runs
+      // (a concurrent write here would race the store's read-modify-write).
+      derivedById.set(fixer.id, fixer);
+      return fixer;
+    },
     onTaskState,
   });
 
@@ -391,8 +425,29 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     (task) => (task.status === 'failed' || task.status === 'blocked') && !repaired.has(task.id),
   );
   const workflowRun = workflowRunFromTasks(run.tasks);
+  // Persist any fixer tasks the scheduler derived at runtime back into the plan,
+  // so the UI (roundtable + todo list, which read plan.tasks) shows the fix pass
+  // — front and back stay in sync on the real executed graph.
+  const plannedIds = new Set(turn.plan.tasks.map((task) => task.id));
+  const derivedTasks: PlanTask[] = run.tasks
+    .filter((task) => !plannedIds.has(task.id))
+    .map((task) => ({
+      id: task.id,
+      title: task.title,
+      assignee: task.assignee,
+      owner: task.owner,
+      role: task.role,
+      brief: task.brief,
+      deps: task.deps,
+      parallel: task.parallel,
+      ...(task.producedFor !== undefined ? { producedFor: task.producedFor } : {}),
+      ...(task.fixRound !== undefined ? { fixRound: task.fixRound } : {}),
+    }));
   const completed = await updateTurn(turn.id, (current) => ({
     ...current,
+    plan: derivedTasks.length > 0
+      ? { ...current.plan, tasks: [...current.plan.tasks, ...derivedTasks] }
+      : current.plan,
     dispatchStatus: failed ? 'failed' : 'completed',
     dispatchAdapter: adapter,
     dispatchedAt: nowIso(),
@@ -711,12 +766,26 @@ async function prepareWorkspace(turn: LocalTurn): Promise<string> {
   const projectWorkspace = await workspaceFromChat(turn.localChatId);
   if (projectWorkspace) {
     await mkdir(projectWorkspace, { recursive: true });
+    await clearRunOutput(projectWorkspace);
     return projectWorkspace;
   }
   const root = resolve(process.env.ROUNDTABLE_WORKSPACE_ROOT || '.roundtable/workspaces');
   const workspace = resolve(root, turn.localChatId ?? turn.id);
   await mkdir(workspace, { recursive: true });
+  await clearRunOutput(workspace);
   return workspace;
+}
+
+// Wipe this system's own output tree (.roundtable/runs) before a run so a
+// re-dispatch — or a different request in the same chat — doesn't leave stale
+// artifacts from the previous run mixed in with the new ones. Only the runs/
+// subtree is removed; any real project files in the workspace are untouched.
+async function clearRunOutput(workspace: string): Promise<void> {
+  try {
+    await rm(join(workspace, '.roundtable', 'runs'), { recursive: true, force: true });
+  } catch {
+    // Best-effort: a missing dir or transient FS error must not block the run.
+  }
 }
 
 async function workspaceFromChat(chatId: string | null): Promise<string | null> {
@@ -750,27 +819,56 @@ function maxFixRounds(): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2;
 }
 
+// Whether a reviewer that reports blocking issues should trigger a fix pass.
+// On by default; set ROUNDTABLE_REVIEW_TRIGGERS_FIX=false to disable.
+function reviewRequestsFix(): boolean {
+  return process.env.ROUNDTABLE_REVIEW_TRIGGERS_FIX !== 'false';
+}
+
+// Parse a reviewer's Markdown report for severity signals. Counts Critical/High
+// (blocking) mentions across EN + 中文 wording. Heuristic by design: reviewers
+// write prose, and a count > 0 is enough to decide "this needs a fix pass".
+export function reviewSeverities(report: string): { blocking: number; label: string } {
+  const critical = countMatches(report, /\b(critical|blocker|severe)\b|🔴|严重|致命|阻断/gi);
+  const high = countMatches(report, /\bhigh\b|🟠|高危|高优先级/gi);
+  // "If it is solid, say so" — an explicit all-clear shouldn't trigger a fix.
+  const allClear = /\b(no (issues|blockers)|looks good|lgtm|ship it|solid)\b|没有(发现)?问题|可以(直接)?交付|无明显问题/i.test(report);
+  const blocking = allClear ? 0 : critical + high;
+  const label = `${critical} critical · ${high} high`;
+  return { blocking, label };
+}
+
+function countMatches(text: string, re: RegExp): number {
+  return (text.match(re) || []).length;
+}
+
 // Derive a fixer task when a task fails (agent error or blocking safety finding).
 // The scheduler wires deps + lineage; we only define what the fixer should do.
 function makeFixerTask(
   failed: ScheduledTask,
-  error: { message: string; scan?: SafetyFinding[] | undefined },
+  error: { message: string; scan?: SafetyFinding[] | undefined; review?: string | undefined },
 ): PlanTask {
   const fixer = AGENT_ROSTER.find((agent) => agent.role === 'fixer') ?? AGENT_ROSTER[0]!;
   const round = (failed.fixRound ?? 0) + 1;
+  const fromReview = failed.role === 'reviewer';
   const findingsText = error.scan && error.scan.length > 0
     ? `\n\nSafety findings:\n${describeFindings(error.scan)}`
     : '';
+  const reviewText = error.review ? `\n\nReview report to address:\n\n${error.review}` : '';
   return {
     id: `fix_${failed.id}_r${round}`,
-    title: `Fix ${failed.title}`,
+    // A review-driven fix reads better as "Apply review fixes" than "Fix Review …".
+    title: fromReview ? `Apply review fixes (round ${round})` : `Fix ${failed.title}`,
     assignee: fixer.assignee,
     owner: fixer.id,
     role: fixer.role,
-    brief:
-      `Repair the failure from "${failed.title}" (${failed.id}). `
-      + `Error: ${error.message}.${findingsText}\n\n`
-      + `Apply a focused fix and summarize the changed files.`,
+    brief: fromReview
+      ? `The reviewer found blocking issues (${error.message}). Apply focused fixes to the `
+        + `implementer's deliverable so each Critical/High issue is resolved, and output the `
+        + `corrected deliverable plus a short summary of what changed.${reviewText}`
+      : `Repair the failure from "${failed.title}" (${failed.id}). `
+        + `Error: ${error.message}.${findingsText}${reviewText}\n\n`
+        + `Apply a focused fix and summarize the changed files.`,
     deps: [failed.id],
     parallel: false,
   };

@@ -193,6 +193,34 @@ describe('scheduler — fix loop', () => {
     expect(fixer?.status).toBe('completed');
   });
 
+  it('passes a review report to the derived fixer as repair context', async () => {
+    // Reviewer "fails" with a review report; the fixer (depending on it) should
+    // receive that report in its handoff context so it knows what to fix.
+    const REVIEW = '🔴 Critical: menu images do not render';
+    let fixerContext = '';
+    const runTask: RunTask = async (t, depOutputs): Promise<TaskResult> => {
+      if (t.id === 'review') {
+        return { ok: false, error: { message: 'review_found_issues', review: REVIEW } };
+      }
+      if (t.id.startsWith('fix_')) {
+        fixerContext = Object.values(depOutputs).map((o) => o.summary).join('\n');
+        return { ok: true, output: { summary: 'fixed' } };
+      }
+      return { ok: true, output: { summary: t.id } };
+    };
+    await runScheduler({
+      tasks: [task('build'), task('review', ['build'])],
+      runTask,
+      maxFixRounds: 1,
+      onFailure: (failed, error) =>
+        // Mirror makeFixerTask: carry the review through onto the derived task is
+        // not needed — the scheduler reads it from the failed task's error.
+        error.review ? task(`fix_${failed.id}`, [failed.id]) : null,
+    });
+    expect(fixerContext).toContain('Review report to address');
+    expect(fixerContext).toContain('menu images do not render');
+  });
+
   it('stops deriving fixers after maxFixRounds and leaves the branch failed', async () => {
     // Everything fails forever. With maxFixRounds=2 we expect: original A +
     // 2 derived fixers = 3 failed executions, then no more derivation.

@@ -20,9 +20,18 @@ import type { SafetyFinding } from './safety.js';
 
 export type TaskOutput = { summary: string; artifactId?: string | undefined };
 
+// Why a task failed. `scan` carries safety findings; `review` carries a reviewer
+// report when a review found blocking issues (so a derived fixer gets the
+// concrete problems to repair).
+export type TaskError = {
+  message: string;
+  scan?: SafetyFinding[] | undefined;
+  review?: string | undefined;
+};
+
 export type TaskResult =
   | { ok: true; output: TaskOutput }
-  | { ok: false; error: { message: string; scan?: SafetyFinding[] | undefined } };
+  | { ok: false; error: TaskError };
 
 export type SchedulerTaskStatus =
   | 'pending'
@@ -34,7 +43,7 @@ export type SchedulerTaskStatus =
 export type ScheduledTask = PlanTask & {
   status: SchedulerTaskStatus;
   output?: TaskOutput | null;
-  error?: { message: string; scan?: SafetyFinding[] | undefined } | null;
+  error?: TaskError | null;
   startedAt?: string | null;
   finishedAt?: string | null;
 };
@@ -62,7 +71,7 @@ export type RunTask = (
 
 export type OnFailure = (
   task: ScheduledTask,
-  error: { message: string; scan?: SafetyFinding[] | undefined },
+  error: TaskError,
 ) => PlanTask | null;
 
 // Fired as a task transitions, so callers can stream live progress (e.g. persist
@@ -280,6 +289,9 @@ export async function runScheduler(opts: SchedulerOpts): Promise<SchedulerRun> {
                   ? `\nSafety findings:\n${depTask.error.scan
                       .map((f) => `- [${f.severity}] ${f.rule}`)
                       .join('\n')}`
+                  : '')
+                + (depTask.error.review
+                  ? `\n\nReview report to address:\n\n${depTask.error.review}`
                   : ''),
             };
           }
