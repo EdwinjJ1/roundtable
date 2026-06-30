@@ -65,10 +65,19 @@ export type OnFailure = (
   error: { message: string; scan?: SafetyFinding[] | undefined },
 ) => PlanTask | null;
 
+// Fired as a task transitions, so callers can stream live progress (e.g. persist
+// per-task stage state for the UI to poll). Best-effort: errors are swallowed so
+// progress reporting can never break the run.
+export type OnTaskState = (
+  taskId: string,
+  status: 'running' | 'completed' | 'failed' | 'blocked',
+) => void | Promise<void>;
+
 export type SchedulerOpts = {
   tasks: PlanTask[];
   runTask: RunTask;
   onFailure?: OnFailure | undefined;
+  onTaskState?: OnTaskState | undefined;
   maxFixRounds?: number | undefined;
   now?: (() => string) | undefined;
 };
@@ -253,6 +262,7 @@ export async function runScheduler(opts: SchedulerOpts): Promise<SchedulerRun> {
     const waveStart = now();
     for (const task of ready) {
       state.set(task.id, { ...task, status: 'running', startedAt: waveStart });
+      await reportTaskState(opts.onTaskState, task.id, 'running');
     }
     const settled = await Promise.allSettled(
       ready.map((task) => {
@@ -305,6 +315,7 @@ export async function runScheduler(opts: SchedulerOpts): Promise<SchedulerRun> {
           producedFor: task.producedFor,
           fixRound: task.fixRound,
         });
+        await reportTaskState(opts.onTaskState, task.id, 'completed');
         continue;
       }
 
@@ -326,6 +337,7 @@ export async function runScheduler(opts: SchedulerOpts): Promise<SchedulerRun> {
         producedFor: task.producedFor,
         fixRound: task.fixRound,
       });
+      await reportTaskState(opts.onTaskState, task.id, 'failed');
 
       if (!opts.onFailure) continue;
       // `origin` is the root of this repair lineage (the first task that failed),
@@ -372,4 +384,19 @@ export async function runScheduler(opts: SchedulerOpts): Promise<SchedulerRun> {
 function errorMessage(reason: unknown): string {
   if (reason instanceof Error) return reason.message;
   return String(reason);
+}
+
+// Best-effort progress notification. A failing/throwing reporter must never
+// break the run, so swallow everything.
+async function reportTaskState(
+  onTaskState: OnTaskState | undefined,
+  taskId: string,
+  status: 'running' | 'completed' | 'failed' | 'blocked',
+): Promise<void> {
+  if (!onTaskState) return;
+  try {
+    await onTaskState(taskId, status);
+  } catch {
+    /* progress reporting is best-effort */
+  }
 }

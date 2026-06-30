@@ -66,6 +66,34 @@ describe('scheduler — execution', () => {
     expect(run.tasks.every((t) => t.status === 'completed')).toBe(true);
   });
 
+  it('streams per-task lifecycle via onTaskState (running before terminal)', async () => {
+    const events: Array<[string, string]> = [];
+    await runScheduler({
+      tasks: [task('A'), task('B', ['A'])],
+      runTask: recordingRunner([]),
+      onTaskState: (taskId, status) => { events.push([taskId, status]); },
+    });
+    // Each task reports running before completed, and A finishes before B starts.
+    expect(events).toEqual([
+      ['A', 'running'],
+      ['A', 'completed'],
+      ['B', 'running'],
+      ['B', 'completed'],
+    ]);
+  });
+
+  it('reports failed via onTaskState', async () => {
+    const events: Array<[string, string]> = [];
+    const runTask: RunTask = async (t) =>
+      t.id === 'A' ? { ok: false, error: { message: 'boom' } } : { ok: true, output: { summary: t.id } };
+    await runScheduler({
+      tasks: [task('A')],
+      runTask,
+      onTaskState: (taskId, status) => { events.push([taskId, status]); },
+    });
+    expect(events).toEqual([['A', 'running'], ['A', 'failed']]);
+  });
+
   it('runs independent tasks as one parallel wave', async () => {
     const started: string[] = [];
     let peakConcurrency = 0;
