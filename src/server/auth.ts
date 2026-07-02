@@ -37,16 +37,21 @@ export function cliActor(): Actor {
 }
 
 export const authOptions: NextAuthOptions = {
+  pages: {
+    signIn: '/signin',
+  },
   providers: [
     CredentialsProvider({
       id: 'dev',
-      name: 'Dev login',
+      name: 'Email',
       credentials: {
         email: { label: 'Email', type: 'email' },
+        name: { label: 'Name', type: 'text' },
       },
       async authorize(credentials) {
         const email = credentials?.email?.trim() || 'dev@roundtable.local';
-        return upsertUser(email);
+        const name = credentials?.name?.trim() || null;
+        return upsertUser(email, name);
       },
     }),
   ],

@@ -1,0 +1,276 @@
+'use client';
+
+import { useMemo, useState } from 'react';
+import type { FormEvent } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { signIn } from 'next-auth/react';
+import { Icon } from './primitives';
+
+type AuthMode = 'signin' | 'signup';
+
+type AuthPageProps = {
+  mode: AuthMode;
+  callbackUrl?: string | undefined;
+};
+
+const agents = [
+  { src: '/avatars/planning.png', ring: '#8076a0', name: 'Planning' },
+  { src: '/avatars/mira.png', ring: '#c47766', name: 'Mira' },
+  { src: '/avatars/atlas.png', ring: '#5f86b8', name: 'Atlas' },
+  { src: '/avatars/beam.png', ring: '#5a9e8c', name: 'Beam' },
+];
+
+export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
+  const router = useRouter();
+  const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
+  const [workspaceName, setWorkspaceName] = useState('Product Squad');
+  const [error, setError] = useState('');
+  const [pending, setPending] = useState(false);
+  const isSignup = mode === 'signup';
+  const target = useMemo(() => {
+    if (!callbackUrl || callbackUrl.startsWith('/api/auth')) return '/';
+    return callbackUrl;
+  }, [callbackUrl]);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError('');
+    setPending(true);
+    const result = await signIn('dev', {
+      email,
+      name: isSignup ? name : undefined,
+      callbackUrl: target,
+      redirect: false,
+    });
+    setPending(false);
+
+    if (result?.error) {
+      setError(isSignup ? 'Could not create that account.' : 'Could not sign in with that email.');
+      return;
+    }
+    if (isSignup) {
+      window.localStorage.setItem('roundtable.pendingWorkbenchName', workspaceName.trim() || 'Product Squad');
+    }
+    router.push(result?.url || target);
+  };
+
+  return (
+    <main style={{
+      minHeight: '100vh', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)',
+      background: 'radial-gradient(circle at 50% 0%, color-mix(in oklab, var(--accent) 14%, transparent), transparent 38%), var(--bg)',
+      color: 'var(--text)', padding: 18,
+    }}>
+      <div style={{
+        width: 'min(1080px, 100%)', margin: 'auto', display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1.05fr) minmax(340px, .8fr)', gap: 18,
+      }}>
+        <section style={{
+          minHeight: 560, border: '1px solid var(--border)', borderRadius: 'var(--r-card)',
+          background: 'color-mix(in oklab, var(--surface) 82%, transparent)',
+          boxShadow: 'var(--shadow-pop)', overflow: 'hidden', position: 'relative',
+        }}>
+          <div style={{ position: 'absolute', inset: 0, background:
+            'linear-gradient(145deg, color-mix(in oklab, var(--surface) 90%, transparent), color-mix(in oklab, var(--surface-2) 86%, transparent))' }} />
+          <div style={{ position: 'relative', height: '100%', padding: 26, display: 'flex', flexDirection: 'column' }}>
+            <Link href="/" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 9, width: 'fit-content',
+              color: 'var(--text)', textDecoration: 'none', fontWeight: 700,
+            }}>
+              <span style={{
+                width: 24, height: 14, borderRadius: '50%', background: 'var(--text)',
+                boxShadow: 'inset 0 -5px 0 color-mix(in oklab, var(--text) 38%, var(--surface))',
+              }} />
+              Roundtable
+            </Link>
+
+            <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}>
+              <div style={{ position: 'relative', width: 'min(520px, 88vw)', aspectRatio: '1.2 / 1' }}>
+                <div style={{
+                  position: 'absolute', left: '14%', right: '14%', top: '28%', height: '34%',
+                  borderRadius: '50%', background: 'var(--surface)',
+                  border: '1px solid var(--border)',
+                  boxShadow: 'inset 0 -24px 34px -30px rgba(40,40,70,.38), 0 24px 70px -42px rgba(40,40,70,.55)',
+                }} />
+                <div style={{
+                  position: 'absolute', left: '28%', right: '28%', top: '39%', height: '13%',
+                  borderRadius: '50%', border: '1px dashed color-mix(in oklab, var(--text-faint) 50%, transparent)',
+                }} />
+                {agents.map((agent, index) => {
+                  const positions = [
+                    { left: '42%', top: '4%' },
+                    { left: '72%', top: '32%' },
+                    { left: '43%', top: '66%' },
+                    { left: '12%', top: '33%' },
+                  ];
+                  return (
+                    <div key={agent.name} style={{
+                      position: 'absolute', ...positions[index], width: 86, textAlign: 'center',
+                      transform: 'translateX(-50%)',
+                    }}>
+                      <div style={{
+                        width: 56, height: 56, margin: '0 auto 9px', borderRadius: '50%',
+                        background: 'var(--surface)', overflow: 'hidden',
+                        boxShadow: `0 0 0 3px var(--surface), 0 0 0 5px ${agent.ring}, 0 12px 28px -18px rgba(40,40,70,.55)`,
+                      }}>
+                        <img src={agent.src} alt="" width={56} height={56}
+                          style={{ display: 'block', width: 56, height: 56, objectFit: 'cover' }} />
+                      </div>
+                      <div style={{ fontSize: 12.5, fontWeight: 700 }}>{agent.name}</div>
+                    </div>
+                  );
+                })}
+                <div style={{
+                  position: 'absolute', left: '50%', top: '43%', transform: 'translate(-50%, -50%)',
+                  padding: '8px 12px', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)',
+                  border: '1px solid var(--border)', color: 'var(--text-muted)', fontSize: 12.5,
+                  boxShadow: 'var(--shadow-card)',
+                }}>
+                  Product Squad
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+              color: 'var(--text-faint)', fontSize: 12 }}>
+              <span>Plan</span>
+              <span>Build</span>
+              <span>Review</span>
+              <span>Ship</span>
+            </div>
+          </div>
+        </section>
+
+        <section style={{
+          minHeight: 560, border: '1px solid var(--border)', borderRadius: 'var(--r-card)',
+          background: 'var(--surface)', boxShadow: 'var(--shadow-pop)', padding: 30,
+          display: 'flex', flexDirection: 'column', justifyContent: 'center',
+        }}>
+          <div style={{ display: 'inline-flex', padding: 3, borderRadius: 'var(--r-sm)',
+            background: 'var(--surface-2)', border: '1px solid var(--border)', width: 'fit-content', marginBottom: 24 }}>
+            <Link href={`/signin?callbackUrl=${encodeURIComponent(target)}`} style={tabStyle(!isSignup)}>Sign in</Link>
+            <Link href={`/signup?callbackUrl=${encodeURIComponent(target)}`} style={tabStyle(isSignup)}>Sign up</Link>
+          </div>
+
+          <h1 style={{ margin: 0, fontSize: 30, lineHeight: 1.12, letterSpacing: 0 }}>
+            {isSignup ? 'Create your Roundtable account' : 'Welcome back to Roundtable'}
+          </h1>
+          <p style={{ margin: '11px 0 24px', color: 'var(--text-muted)', fontSize: 14.5, lineHeight: 1.55 }}>
+            {isSignup
+              ? 'Start with your work email. Your workspace, missions, and agent history will stay tied to this account.'
+              : 'Use the email connected to your workspace to continue where your team left off.'}
+          </p>
+
+          <form onSubmit={submit} style={{ display: 'grid', gap: 13 }}>
+            {isSignup && (
+              <label style={{ display: 'grid', gap: 7, fontSize: 12.5, fontWeight: 700, color: 'var(--text-muted)' }}>
+                Name
+                <input
+                  type="text"
+                  autoComplete="name"
+                  required
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="Peitong Qi"
+                  style={inputStyle}
+                />
+              </label>
+            )}
+            <label style={{ display: 'grid', gap: 7, fontSize: 12.5, fontWeight: 700, color: 'var(--text-muted)' }}>
+              Work email
+              <input
+                type="email"
+                autoComplete="email"
+                required
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="you@company.com"
+                style={inputStyle}
+              />
+            </label>
+            {isSignup && (
+              <label style={{ display: 'grid', gap: 7, fontSize: 12.5, fontWeight: 700, color: 'var(--text-muted)' }}>
+                Workspace name
+                <input
+                  type="text"
+                  autoComplete="organization"
+                  required
+                  value={workspaceName}
+                  onChange={(event) => setWorkspaceName(event.target.value)}
+                  placeholder="Product Squad"
+                  style={inputStyle}
+                />
+              </label>
+            )}
+
+            {error && <div style={{
+              padding: '9px 11px', borderRadius: 'var(--r-sm)',
+              background: 'color-mix(in oklab, var(--bad) 10%, var(--surface))',
+              border: '1px solid color-mix(in oklab, var(--bad) 28%, var(--border))',
+              color: 'var(--bad)', fontSize: 13,
+            }}>{error}</div>}
+
+            <button type="submit" disabled={pending} style={{
+              height: 44, border: 'none', borderRadius: 'var(--r-sm)', background: 'var(--accent)',
+              color: '#fff', font: 'inherit', fontSize: 14, fontWeight: 700,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              cursor: pending ? 'default' : 'pointer', opacity: pending ? .72 : 1,
+            }}>
+              <Icon name={isSignup ? 'plus' : 'door'} size={15} style={{}} />
+              {pending ? 'Continuing...' : isSignup ? 'Create account' : 'Sign in'}
+            </button>
+          </form>
+
+          <div style={{
+            marginTop: 22, paddingTop: 18, borderTop: '1px solid var(--border)',
+            color: 'var(--text-muted)', fontSize: 13.5, lineHeight: 1.5,
+          }}>
+            {isSignup ? (
+              <>Already have an account? <Link href={`/signin?callbackUrl=${encodeURIComponent(target)}`} style={linkStyle}>Sign in</Link></>
+            ) : (
+              <>New to Roundtable? <Link href={`/signup?callbackUrl=${encodeURIComponent(target)}`} style={linkStyle}>Create an account</Link></>
+            )}
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function tabStyle(active: boolean) {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 86,
+    height: 32,
+    padding: '0 13px',
+    borderRadius: 'calc(var(--r-sm) - 2px)',
+    color: active ? 'var(--text)' : 'var(--text-muted)',
+    background: active ? 'var(--surface)' : 'transparent',
+    boxShadow: active ? 'var(--shadow-card)' : 'none',
+    textDecoration: 'none',
+    fontSize: 13,
+    fontWeight: 700,
+  };
+}
+
+const linkStyle = {
+  color: 'var(--accent)',
+  fontWeight: 700,
+  textDecoration: 'none',
+};
+
+const inputStyle = {
+  height: 44,
+  width: '100%',
+  borderRadius: 'var(--r-sm)',
+  border: '1px solid var(--border)',
+  background: 'var(--surface-2)',
+  color: 'var(--text)',
+  padding: '0 13px',
+  font: 'inherit',
+  fontSize: 14,
+  outline: 'none',
+};

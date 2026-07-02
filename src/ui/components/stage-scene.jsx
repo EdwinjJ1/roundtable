@@ -196,7 +196,7 @@ function MiniSeg({ value, options, onChange }) {
 }
 
 /* ---- TopBar --------------------------------------------------------------- */
-function AccountControl({ authStatus, user, onSignIn, onSignOut }) {
+function AccountControl({ authStatus, user, onSignIn, onSignUp, onSignOut }) {
   const authed = authStatus === 'authenticated';
   const loading = authStatus === 'loading';
   const label = user?.email || user?.name || 'Account';
@@ -219,18 +219,29 @@ function AccountControl({ authStatus, user, onSignIn, onSignOut }) {
   }
 
   return (
-    <button onClick={onSignIn} disabled={loading} title="Sign in or create an account" style={{
-      display: 'inline-flex', alignItems: 'center', gap: 7, padding: '7px 12px',
-      borderRadius: 'var(--r-chip)', border: '1px solid var(--border)',
-      background: 'var(--surface-2)', color: loading ? 'var(--text-faint)' : 'var(--text-muted)',
-      font: 'inherit', fontSize: 12.5, fontWeight: 500, cursor: loading ? 'default' : 'pointer',
-    }}>
-      <Icon name="at" size={14} />{loading ? 'Checking...' : 'Sign in'}
-    </button>
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <button onClick={onSignIn} disabled={loading} title="Sign in" style={{
+        display: 'inline-flex', alignItems: 'center', gap: 7, padding: '7px 12px',
+        borderRadius: 'var(--r-chip)', border: '1px solid var(--border)',
+        background: 'var(--surface-2)', color: loading ? 'var(--text-faint)' : 'var(--text-muted)',
+        font: 'inherit', fontSize: 12.5, fontWeight: 500, cursor: loading ? 'default' : 'pointer',
+      }}>
+        <Icon name="at" size={14} />{loading ? 'Checking...' : 'Sign in'}
+      </button>
+      <button onClick={onSignUp} disabled={loading} title="Create an account" style={{
+        display: 'inline-flex', alignItems: 'center', gap: 7, padding: '7px 12px',
+        borderRadius: 'var(--r-chip)', border: 'none',
+        background: 'var(--accent)', color: '#fff',
+        font: 'inherit', fontSize: 12.5, fontWeight: 700, cursor: loading ? 'default' : 'pointer',
+        opacity: loading ? .72 : 1,
+      }}>
+        <Icon name="plus" size={14} />Sign up
+      </button>
+    </div>
   );
 }
 
-function TopBar({ t, setTweak, view, setView, authStatus, user, onSignIn, onSignOut }) {
+function TopBar({ t, setTweak, view, setView, authStatus, user, onSignIn, onSignUp, onSignOut }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '0 18px', height: 54,
       borderBottom: '1px solid var(--border)', background: 'var(--surface)', flexShrink: 0 }}>
@@ -238,7 +249,7 @@ function TopBar({ t, setTweak, view, setView, authStatus, user, onSignIn, onSign
         { v: 'roundtable', label: 'Roundtable', icon: 'layers' },
         { v: 'workflow', label: 'Workflow', icon: 'sparkle' }]} />
       <div style={{ flex: 1 }} />
-      <AccountControl authStatus={authStatus} user={user} onSignIn={onSignIn} onSignOut={onSignOut} />
+      <AccountControl authStatus={authStatus} user={user} onSignIn={onSignIn} onSignUp={onSignUp} onSignOut={onSignOut} />
       <button onClick={() => setTweak('theme', t.theme === 'light' ? 'dark' : 'light')} title="Toggle theme"
         style={{ ...iconBtn, background: 'var(--surface-2)' }}>
         <Icon name={t.theme === 'light' ? 'moon' : 'sun'} size={16} />
