@@ -258,6 +258,7 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
 }
 
 function SkillsPanel({ authed, activeChatId, context }) {
+  const [showManage, setShowManage] = useState(false);
   const utils = trpc.useUtils();
   const skillsQ = trpc.userSkills.list.useQuery(undefined, { enabled: !!authed });
   const suggestionsQ = trpc.userSkills.suggestions.useQuery(undefined, { enabled: !!authed });
@@ -296,6 +297,10 @@ function SkillsPanel({ authed, activeChatId, context }) {
   const existingPersonalKeys = new Set(active.filter((skill) => skill.scope !== 'mission').map((skill) => skill.key));
   const suggested = (suggestionsQ.data || []).filter((skill) => !existingPersonalKeys.has(skill.key));
   const recommended = (recommendedQ.data || []).filter((skill) => !enabledKeys.has(skill.key));
+  const enabled = active.filter((skill) => skill.enabled);
+  const alwaysOn = enabled.filter((skill) => skill.scope !== 'mission');
+  const missionOnly = enabled.filter((skill) => skill.scope === 'mission' && skill.targetChatId === activeChatId);
+  const missionLead = activeChatId ? recommended[0] : null;
   const busy = upsertSkill.isPending || setEnabled.isPending || deleteSkill.isPending;
   const accept = (skill, scope = skill.scope || 'personal') => {
     upsertSkill.mutate({
@@ -309,58 +314,181 @@ function SkillsPanel({ authed, activeChatId, context }) {
       enabled: true,
     });
   };
+  const acceptSetup = () => {
+    suggested.slice(0, 3).forEach((skill) => accept(skill, 'personal'));
+  };
 
   return (
-    <div style={{ flex: 1, overflowY: 'auto', padding: '16px 16px 24px', display: 'grid', gap: 16 }}>
-      <SkillSection title="Active skills" meta={`${active.filter((skill) => skill.enabled).length} enabled`}>
-        {skillsQ.isLoading ? (
-          <SkillEmpty>Loading skills...</SkillEmpty>
-        ) : active.length === 0 ? (
-          <SkillEmpty>No skills enabled yet.</SkillEmpty>
-        ) : active.map((skill) => (
-          <SkillCard key={skill.id || skill.key} skill={skill}
-            action={
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button disabled={busy} onClick={() => setEnabled.mutate({
-                  key: skill.key,
-                  enabled: !skill.enabled,
-                  scope: skill.scope,
-                  targetChatId: skill.targetChatId,
-                })}
-                  style={smallButton(skill.enabled ? 'neutral' : 'primary')}>
-                  {skill.enabled ? 'Disable' : 'Enable'}
-                </button>
-                <button disabled={busy} onClick={() => deleteSkill.mutate({
-                  key: skill.key,
-                  scope: skill.scope,
-                  targetChatId: skill.targetChatId,
-                })} style={smallButton('ghost')}>
-                  Remove
-                </button>
-              </div>
-            } />
-        ))}
+    <div style={{ flex: 1, overflowY: 'auto', padding: '16px 16px 24px', display: 'grid', gap: 14 }}>
+      <section style={{ padding: 15, borderRadius: 'var(--r-card)', border: '1px solid var(--border)',
+        background: 'linear-gradient(180deg, color-mix(in oklab, var(--surface) 94%, var(--accent)), var(--surface))',
+        boxShadow: 'var(--shadow-card)', display: 'grid', gap: 13 }}>
+        <div style={{ display: 'grid', gap: 11 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 850, color: 'var(--text)' }}>Working style</div>
+            <div style={{ marginTop: 4, fontSize: 12.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+              {enabled.length > 0
+                ? `${enabled.length} skill${enabled.length === 1 ? '' : 's'} guiding this workspace.`
+                : 'Roundtable is not using any skills yet.'}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <SkillMetric value={alwaysOn.length} label="Always" />
+            <SkillMetric value={missionOnly.length} label="Mission" />
+            <SkillMetric value={suggested.length} label="Ideas" />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', minHeight: 28, alignItems: 'center' }}>
+          {enabled.length === 0 ? (
+            <>
+              <GhostSkillChip label="Plan first" />
+              <GhostSkillChip label="Visual review" />
+              <GhostSkillChip label="Verify" />
+            </>
+          ) : enabled.slice(0, 5).map((skill) => <ActiveSkillChip key={skill.id || skill.key} skill={skill} />)}
+        </div>
+
+        <div style={{ display: 'grid', gap: 9, justifyItems: 'start' }}>
+          <div style={{ fontSize: 11.5, color: 'var(--text-faint)', lineHeight: 1.35 }}>
+            {missionOnly.length > 0 ? 'Mission-only rules are active for this chat.' : 'Suggestions stay off until you choose them.'}
+          </div>
+          {enabled.length === 0 && suggested.length > 0 ? (
+            <button disabled={busy} onClick={acceptSetup} style={{ ...smallButton('primary'), width: '100%', justifyContent: 'center' }}>Use recommended setup</button>
+          ) : (
+            <button onClick={() => setShowManage((value) => !value)} style={smallButton('neutral')}>
+              {showManage ? 'Hide details' : 'Manage'}
+            </button>
+          )}
+        </div>
+      </section>
+
+      <SkillSection title="For this mission" meta={activeChatId ? 'Context-aware' : 'Open a mission'}>
+        {missionOnly.length > 0 ? (
+          <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+            {missionOnly.map((skill) => <ActiveSkillChip key={skill.id || skill.key} skill={skill} tone="mission" />)}
+          </div>
+        ) : missionLead ? (
+          <MissionSkillCard skill={missionLead} busy={busy} onEnable={() => accept(missionLead, 'mission')} />
+        ) : (
+          <SkillEmpty>Open a mission chat to enable mission-only skills.</SkillEmpty>
+        )}
       </SkillSection>
 
-      <SkillSection title="Suggested for you" meta="Observed from workflow">
+      <SkillSection title="Suggested always-on" meta="Quiet defaults">
         {suggested.length === 0 ? (
           <SkillEmpty>No new suggestions right now.</SkillEmpty>
-        ) : suggested.map((skill) => (
-          <SkillCard key={skill.key} skill={skill} reason={skill.reason}
-            action={<button disabled={busy} onClick={() => accept(skill, 'personal')} style={smallButton('primary')}>Accept</button>} />
+        ) : suggested.slice(0, 3).map((skill) => (
+          <SkillRow key={skill.key} skill={skill} busy={busy} onAccept={() => accept(skill, 'personal')} />
         ))}
       </SkillSection>
 
-      <SkillSection title="Recommended for this mission" meta="Context-aware">
-        {!activeChatId ? (
-          <SkillEmpty>Open a mission chat to enable mission-only skills.</SkillEmpty>
-        ) : recommended.length === 0 ? (
-          <SkillEmpty>Start a mission to see contextual recommendations.</SkillEmpty>
-        ) : recommended.map((skill) => (
-          <SkillCard key={skill.key} skill={skill} reason={skill.reason}
-            action={<button disabled={busy} onClick={() => accept(skill, 'mission')} style={smallButton('neutral')}>Enable for mission</button>} />
-        ))}
-      </SkillSection>
+      <button onClick={() => setShowManage((value) => !value)} style={{ border: 'none', background: 'transparent',
+        color: 'var(--text-muted)', font: 'inherit', fontSize: 12.5, fontWeight: 750, cursor: 'pointer',
+        display: 'inline-flex', alignItems: 'center', gap: 6, justifySelf: 'start', padding: '2px 0' }}>
+        <Icon name="layers" size={13} /> {showManage ? 'Hide full skill controls' : 'Show full skill controls'}
+      </button>
+
+      {showManage && (
+        <SkillSection title="Full controls" meta={`${active.length} saved`}>
+          {skillsQ.isLoading ? (
+            <SkillEmpty>Loading skills...</SkillEmpty>
+          ) : active.length === 0 ? (
+            <SkillEmpty>No saved skills yet.</SkillEmpty>
+          ) : active.map((skill) => (
+            <SkillCard key={skill.id || skill.key} skill={skill}
+              action={
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button disabled={busy} onClick={() => setEnabled.mutate({
+                    key: skill.key,
+                    enabled: !skill.enabled,
+                    scope: skill.scope,
+                    targetChatId: skill.targetChatId,
+                  })}
+                    style={smallButton(skill.enabled ? 'neutral' : 'primary')}>
+                    {skill.enabled ? 'Disable' : 'Enable'}
+                  </button>
+                  <button disabled={busy} onClick={() => deleteSkill.mutate({
+                    key: skill.key,
+                    scope: skill.scope,
+                    targetChatId: skill.targetChatId,
+                  })} style={smallButton('ghost')}>
+                    Remove
+                  </button>
+                </div>
+              } />
+          ))}
+        </SkillSection>
+      )}
+    </div>
+  );
+}
+
+function SkillMetric({ value, label }) {
+  return (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, borderRadius: 'var(--r-chip)', border: '1px solid var(--border)',
+      background: 'color-mix(in oklab, var(--surface) 88%, transparent)', padding: '5px 8px' }}>
+      <span className="mono tnum" style={{ fontSize: 12, fontWeight: 850, color: 'var(--text)' }}>{value}</span>
+      <span style={{ fontSize: 10.5, color: 'var(--text-faint)', fontWeight: 750, textTransform: 'uppercase', letterSpacing: '.04em' }}>{label}</span>
+    </div>
+  );
+}
+
+function GhostSkillChip({ label }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 9px', borderRadius: 'var(--r-chip)',
+      border: '1px dashed var(--border)', color: 'var(--text-faint)', background: 'var(--surface-2)', fontSize: 11.5, fontWeight: 750 }}>
+      <Icon name="dot" size={9} /> {label}
+    </span>
+  );
+}
+
+function ActiveSkillChip({ skill, tone = 'default' }) {
+  const mission = tone === 'mission' || skill.scope === 'mission';
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderRadius: 'var(--r-chip)',
+      background: mission ? tint('var(--ok)', 13) : tint('var(--accent)', 13),
+      color: mission ? 'var(--ok)' : 'var(--accent)', fontSize: 11.5, fontWeight: 800 }}>
+      <Icon name={mission ? 'pin' : 'sparkle'} size={12} /> {shortSkillLabel(skill.label)}
+    </span>
+  );
+}
+
+function MissionSkillCard({ skill, busy, onEnable }) {
+  return (
+    <div style={{ padding: 13, borderRadius: 'var(--r-card)', border: '1px solid color-mix(in oklab, var(--accent) 38%, var(--border))',
+      background: 'color-mix(in oklab, var(--accent) 7%, var(--surface))', display: 'grid', gap: 10 }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+        <span style={{ display: 'grid', placeItems: 'center', width: 30, height: 30, borderRadius: 8,
+          background: tint('var(--accent)', 14), color: 'var(--accent)', flexShrink: 0 }}>
+          <Icon name="pin" size={14} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 850, color: 'var(--text)' }}>{skill.label}</div>
+          <div style={{ marginTop: 4, fontSize: 12.2, color: 'var(--text-muted)', lineHeight: 1.45 }}>{skill.description}</div>
+          <div style={{ marginTop: 5, fontSize: 11.5, color: 'var(--text-faint)', lineHeight: 1.4 }}>{skill.reason}</div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <button disabled={busy} onClick={onEnable} style={smallButton('primary')}>Enable for mission</button>
+      </div>
+    </div>
+  );
+}
+
+function SkillRow({ skill, busy, onAccept }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 11px', borderRadius: 'var(--r-sm)',
+      border: '1px solid var(--border)', background: 'var(--surface)' }}>
+      <span style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, borderRadius: 7,
+        background: tint('var(--accent)', 11), color: 'var(--accent)', flexShrink: 0 }}>
+        <Icon name="sparkle" size={12} />
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 12.7, fontWeight: 800, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skill.label}</div>
+        <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--text-faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skill.description}</div>
+      </div>
+      <button disabled={busy} onClick={onAccept} style={smallButton('neutral')}>Accept</button>
     </div>
   );
 }
@@ -375,6 +503,10 @@ function SkillSection({ title, meta, children }) {
       {children}
     </section>
   );
+}
+
+function shortSkillLabel(label) {
+  return String(label || '').replace(' before implementation', ' first').replace(' required', '').replace(' before push', '');
 }
 
 function SkillCard({ skill, reason, action }) {
