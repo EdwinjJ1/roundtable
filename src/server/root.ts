@@ -17,7 +17,7 @@ import {
 import { getMission, listMissions, listWorkflowTemplates } from './actions/mission-actions.js';
 import { listArtifactsByChat, listHandoffsByChat } from './actions/read-actions.js';
 import { createWorkbench, listWorkbenches } from './actions/workbench-actions.js';
-import { createCallerFactory, createTRPCRouter, protectedProcedure, publicProcedure } from './trpc.js';
+import { createTRPCRouter, protectedProcedure, publicProcedure } from './trpc.js';
 
 const idInput = z.object({ id: z.string().min(1) });
 const chatIdInput = z.object({ chatId: z.string().min(1) });
@@ -112,7 +112,5 @@ export const appRouter = createTRPCRouter({
   workbenches: workbenchesRouter,
   workbenchPinned: workbenchPinnedRouter,
 });
-
-export const createCaller = createCallerFactory(appRouter);
 
 export type AppRouter = typeof appRouter;

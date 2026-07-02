@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runAgentTask } from '../src/server/actions/agent-runner.js';
 import {
   makeFixerTask,
@@ -136,6 +136,67 @@ describe('repairedTargetArtifact — fix lands in the previewed artifact', () =>
 
   it('returns null when the fixer output is prose, not a deliverable', () => {
     expect(repairedTargetArtifact(original, 'I fixed the issues by adjusting the CSS.')).toBeNull();
+  });
+});
+
+describe('runAgentTask — chat model deliverable extraction', () => {
+  let tempDir = '';
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'roundtable-chat-'));
+    process.env.ROUNDTABLE_OPENAI_API_KEY = 'test-key';
+    process.env.ROUNDTABLE_OPENAI_BASE_URL = 'https://model.test/v1';
+    process.env.ROUNDTABLE_OPENAI_MODEL = 'test-model';
+  });
+
+  afterEach(async () => {
+    delete process.env.ROUNDTABLE_OPENAI_API_KEY;
+    delete process.env.ROUNDTABLE_OPENAI_BASE_URL;
+    delete process.env.ROUNDTABLE_OPENAI_MODEL;
+    vi.unstubAllGlobals();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  function stubModelResponse(content: string): void {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ choices: [{ message: { content } }], usage: {} }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )));
+  }
+
+  const htmlTask = () => task({
+    id: 'task_atlas',
+    role: 'implementer',
+    owner: 'atlas',
+    assignee: '@atlas',
+    title: 'Build the hotpot website (Atlas)',
+    brief: 'Build the hotpot website. User request: 做一个火锅店网站',
+  });
+
+  it('recovers a fenced, truncated HTML response into a clean document', async () => {
+    stubModelResponse('```html\n<!DOCTYPE html>\n<html><head><style>.item { font-size');
+    const result = await runAgentTask({
+      adapter: 'openai-compat',
+      workspace: tempDir,
+      task: htmlTask(),
+      message: '做一个火锅店网站',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.text.startsWith('<!DOCTYPE html>')).toBe(true);
+    expect(result.text).not.toContain('```');
+    expect(result.kind).toBe('preview');
+  });
+
+  it('fails the task when the model returns prose instead of a page', async () => {
+    stubModelResponse('抱歉，我无法生成这个页面。');
+    const result = await runAgentTask({
+      adapter: 'openai-compat',
+      workspace: tempDir,
+      task: htmlTask(),
+      message: '做一个火锅店网站',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('deliverable_not_usable');
   });
 });
 

@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { AgentEvent, ArtifactKind, PlanTask } from '../types.js';
 import { agentForTask, type AgentProfile } from './agent-roster.js';
+import { deliverableText } from './deliverable.js';
 import { runOnE2B } from './adapters/e2b-adapter.js';
 import { miniMaxModel, MiniMaxUnavailableError, runOnMiniMax } from './adapters/minimax-adapter.js';
 import { openAICompatModel, OpenAICompatUnavailableError, runOnOpenAICompat } from './adapters/openai-compat-adapter.js';
@@ -209,15 +210,24 @@ function e2bAgentEnv(): Record<string, string> {
   return env;
 }
 
-// Runs the task against the real MiniMax model. Throws MiniMaxUnavailableError
-// (from runOnMiniMax) when no key is set — the dispatch layer catches it and
-// falls back to local-dispatch.
-async function runMiniMaxTask(input: {
-  workspace: string;
-  task: PlanTask;
-  message: string;
-  handoffContext?: string | undefined;
-}): Promise<AgentRunResult> {
+// Shared implementation for chat-only model adapters (MiniMax, OpenAI-compat):
+// same prompts, same deliverable extraction, same failure semantics. Only the
+// transport call and display metadata differ per provider.
+type ChatModelRun = (input: {
+  messages: Array<{ role: 'system' | 'user'; content: string }>;
+  timeoutMs: number;
+  maxTokens: number;
+}) => Promise<{ text: string; usage?: Record<string, unknown> | undefined }>;
+
+async function runChatModelTask(
+  input: {
+    workspace: string;
+    task: PlanTask;
+    message: string;
+    handoffContext?: string | undefined;
+  },
+  provider: { name: string; toolName: string; model: string; run: ChatModelRun; isUnavailable: (error: unknown) => boolean },
+): Promise<AgentRunResult> {
   const agent = agentForTask(input.task);
   const path = pathForTask(input.task);
   const toolId = `tool_${input.task.id}`;
@@ -226,38 +236,19 @@ async function runMiniMaxTask(input: {
     ? `Task: ${input.task.title}\n\nUpstream deliverable to build on / review:\n\n${input.handoffContext}\n\nProduce your deliverable now.`
     : `Task: ${input.task.title}\n\nProduce your deliverable now.`;
   const started: AgentEvent[] = [
-    { type: 'thinking_delta', delta: `${agent.displayName} querying MiniMax model.` },
-    { type: 'tool_use', id: toolId, name: 'minimax_chat', input: { agentId: agent.id, role: agent.role, path } },
+    { type: 'thinking_delta', delta: `${agent.displayName} querying ${provider.model}.` },
+    { type: 'tool_use', id: toolId, name: provider.toolName, input: { agentId: agent.id, role: agent.role, path } },
   ];
-  try {
-    const run = await runOnMiniMax({
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-      timeoutMs: timeoutMs(),
-    });
-    const text = deliverableText(run.text.trim(), path) || `# ${input.task.title}\n\nMiniMax returned no usable content.`;
-    await writeWorkspaceFile(input.workspace, path, text);
-    const reasoningTokens = (run.usage?.['completion_tokens_details'] as { reasoning_tokens?: number } | undefined)?.reasoning_tokens;
-    return {
-      text,
-      path,
-      kind: kindForPath(path),
-      ok: true,
-      error: null,
-      events: [
-        ...started,
-        { type: 'tool_result', id: toolId, output: { model: miniMaxModel(), reasoningTokens: reasoningTokens ?? 0, chars: text.length } },
-        { type: 'file_change', path, kind: 'create', diff: `created ${path}` },
-        { type: 'text_delta', delta: `${agent.displayName} produced ${path} via MiniMax.` },
-        { type: 'done', finishReason: 'completed' },
-      ],
-    };
-  } catch (error) {
-    if (error instanceof MiniMaxUnavailableError) throw error; // let dispatch fall back
-    const message = error instanceof Error ? error.message : String(error);
-    const text = `# ${input.task.title}\n\nMiniMax request failed.\n\n${message}`;
+
+  const failure = async (message: string, rawResponse?: string): Promise<AgentRunResult> => {
+    const text = [
+      `# ${input.task.title}`,
+      '',
+      `${provider.name} did not produce a usable deliverable for ${path}.`,
+      '',
+      `Error: ${message}`,
+      ...(rawResponse ? ['', '---', '', rawResponse.slice(0, 2000)] : []),
+    ].join('\n');
     await writeWorkspaceFile(input.workspace, path, text);
     return {
       text,
@@ -271,74 +262,83 @@ async function runMiniMaxTask(input: {
         { type: 'error', message, recoverable: true },
       ],
     };
+  };
+
+  try {
+    const run = await provider.run({
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      timeoutMs: timeoutMs(),
+      // A full page routinely exceeds the 8192 default and comes back truncated
+      // mid-tag; extraction keeps it renderable, but the real ceiling is set
+      // here (tune per provider limit).
+      maxTokens: modelMaxTokens(),
+    });
+    // Extraction is strict on purpose: a .html artifact holding prose or a raw
+    // fence is worse than a failed task, because a failure feeds the review→fix
+    // loop while a garbage artifact ships as "completed".
+    const text = deliverableText(run.text, path);
+    if (text === null || text.length === 0) {
+      return failure('deliverable_not_usable', run.text);
+    }
+    await writeWorkspaceFile(input.workspace, path, text);
+    const reasoningTokens = (run.usage?.['completion_tokens_details'] as { reasoning_tokens?: number } | undefined)?.reasoning_tokens;
+    return {
+      text,
+      path,
+      kind: kindForPath(path),
+      ok: true,
+      error: null,
+      events: [
+        ...started,
+        { type: 'tool_result', id: toolId, output: { model: provider.model, reasoningTokens: reasoningTokens ?? 0, chars: text.length } },
+        { type: 'file_change', path, kind: 'create', diff: `created ${path}` },
+        { type: 'text_delta', delta: `${agent.displayName} produced ${path} via ${provider.model}.` },
+        { type: 'done', finishReason: 'completed' },
+      ],
+    };
+  } catch (error) {
+    if (provider.isUnavailable(error)) throw error; // let dispatch fall back
+    return failure(error instanceof Error ? error.message : String(error));
   }
+}
+
+// Runs the task against the real MiniMax model. Throws MiniMaxUnavailableError
+// (from runOnMiniMax) when no key is set — the dispatch layer catches it and
+// falls back to local-dispatch.
+function runMiniMaxTask(input: {
+  workspace: string;
+  task: PlanTask;
+  message: string;
+  handoffContext?: string | undefined;
+}): Promise<AgentRunResult> {
+  return runChatModelTask(input, {
+    name: 'MiniMax',
+    toolName: 'minimax_chat',
+    model: miniMaxModel(),
+    run: runOnMiniMax,
+    isUnavailable: (error) => error instanceof MiniMaxUnavailableError,
+  });
 }
 
 // Runs the task against the configured OpenAI-compatible model. Throws
 // OpenAICompatUnavailableError (from runOnOpenAICompat) when unconfigured — the
-// dispatch layer catches it and falls back to local-dispatch. Like runMiniMaxTask
-// this is a chat-only model: the deliverable comes back in the response text (no
-// shell / file tools).
-async function runOpenAICompatTask(input: {
+// dispatch layer catches it and falls back to local-dispatch.
+function runOpenAICompatTask(input: {
   workspace: string;
   task: PlanTask;
   message: string;
   handoffContext?: string | undefined;
 }): Promise<AgentRunResult> {
-  const agent = agentForTask(input.task);
-  const path = pathForTask(input.task);
-  const toolId = `tool_${input.task.id}`;
-  const system = chatAgentPrompt(agent, input);
-  const user = input.handoffContext
-    ? `Task: ${input.task.title}\n\nUpstream deliverable to build on / review:\n\n${input.handoffContext}\n\nProduce your deliverable now.`
-    : `Task: ${input.task.title}\n\nProduce your deliverable now.`;
-  const started: AgentEvent[] = [
-    { type: 'thinking_delta', delta: `${agent.displayName} querying ${openAICompatModel()}.` },
-    { type: 'tool_use', id: toolId, name: 'model_chat', input: { agentId: agent.id, role: agent.role, path } },
-  ];
-  try {
-    const run = await runOnOpenAICompat({
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-      timeoutMs: timeoutMs(),
-    });
-    const text = deliverableText(run.text.trim(), path) || `# ${input.task.title}\n\nModel returned no usable content.`;
-    await writeWorkspaceFile(input.workspace, path, text);
-    const reasoningTokens = (run.usage?.['completion_tokens_details'] as { reasoning_tokens?: number } | undefined)?.reasoning_tokens;
-    return {
-      text,
-      path,
-      kind: kindForPath(path),
-      ok: true,
-      error: null,
-      events: [
-        ...started,
-        { type: 'tool_result', id: toolId, output: { model: openAICompatModel(), reasoningTokens: reasoningTokens ?? 0, chars: text.length } },
-        { type: 'file_change', path, kind: 'create', diff: `created ${path}` },
-        { type: 'text_delta', delta: `${agent.displayName} produced ${path} via ${openAICompatModel()}.` },
-        { type: 'done', finishReason: 'completed' },
-      ],
-    };
-  } catch (error) {
-    if (error instanceof OpenAICompatUnavailableError) throw error; // let dispatch fall back
-    const message = error instanceof Error ? error.message : String(error);
-    const text = `# ${input.task.title}\n\nModel request failed.\n\n${message}`;
-    await writeWorkspaceFile(input.workspace, path, text);
-    return {
-      text,
-      path,
-      kind: kindForPath(path),
-      ok: false,
-      error: message,
-      events: [
-        ...started,
-        { type: 'tool_result', id: toolId, output: { error: message }, isError: true },
-        { type: 'error', message, recoverable: true },
-      ],
-    };
-  }
+  return runChatModelTask(input, {
+    name: openAICompatModel(),
+    toolName: 'model_chat',
+    model: openAICompatModel(),
+    run: runOnOpenAICompat,
+    isUnavailable: (error) => error instanceof OpenAICompatUnavailableError,
+  });
 }
 
 function pathForTask(task: PlanTask): string {
@@ -373,23 +373,6 @@ function kindForPath(path: string): ArtifactKind {
   if (path.endsWith('.html')) return 'preview';
   if (path.endsWith('.ts') || path.endsWith('.tsx') || path.endsWith('.js')) return 'code';
   return 'markdown';
-}
-
-// Chat models often wrap a code/HTML deliverable in a Markdown code fence
-// (```html … ```) despite being told not to. For artifacts that are meant to be
-// raw code/HTML (rendered in an iframe or saved as a source file), unwrap a
-// single enclosing fence so the file is the real content, not fenced text.
-// Markdown artifacts (.md) keep their fences — they're documents.
-function stripCodeFence(text: string): string {
-  const trimmed = text.trim();
-  // Only unwrap when the WHOLE response is one fenced block, to avoid mangling
-  // docs that legitimately contain multiple code snippets.
-  const match = trimmed.match(/^```[a-zA-Z0-9]*\n([\s\S]*?)\n?```$/);
-  return match ? match[1]!.trim() : trimmed;
-}
-
-function deliverableText(text: string, path: string): string {
-  return path.endsWith('.md') ? text : stripCodeFence(text);
 }
 
 async function writeWorkspaceFile(workspace: string, relativePath: string, text: string): Promise<void> {
@@ -628,6 +611,13 @@ function splitArgs(raw: string): string[] {
 function timeoutMs(): number {
   const parsed = Number(process.env.ROUNDTABLE_AGENT_TIMEOUT_MS);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 120_000;
+}
+
+// Output ceiling for chat model deliverables. Full HTML pages routinely exceed
+// the common 8192 default; raise it to whatever the configured provider allows.
+function modelMaxTokens(): number {
+  const parsed = Number(process.env.ROUNDTABLE_MODEL_MAX_TOKENS);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 8192;
 }
 
 async function runCommand(

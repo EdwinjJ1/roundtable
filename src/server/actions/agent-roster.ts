@@ -114,10 +114,6 @@ export function agentCardFor(profile: AgentProfile): AgentCard {
   };
 }
 
-export function agentCards(): AgentCard[] {
-  return AGENT_ROSTER.map(agentCardFor);
-}
-
 export function resolveAgentMention(value: string): AgentProfile | null {
   const normalized = value.replace(/^@/, '').trim().toLowerCase();
   if (!normalized || normalized === 'all') return null;

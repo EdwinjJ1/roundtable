@@ -7,8 +7,6 @@ export interface AuthSession extends Session {
   user: Actor;
 }
 
-export type AuthUser = Actor;
-
 export async function upsertUser(emailInput: string, nameInput?: string | null): Promise<Actor> {
   const email = emailInput.trim().toLowerCase();
   if (!email) throw new Error('missing_email');
@@ -26,14 +24,6 @@ export async function upsertUser(emailInput: string, nameInput?: string | null):
     data.users.push(created);
     return { id: created.id, email: created.email, name: created.name };
   });
-}
-
-export function cliActor(): Actor {
-  return {
-    id: process.env.ROUNDTABLE_CLI_USER_ID || 'cli-user',
-    email: process.env.ROUNDTABLE_CLI_USER_EMAIL || 'cli@roundtable.local',
-    name: 'CLI User',
-  };
 }
 
 export const authOptions: NextAuthOptions = {
