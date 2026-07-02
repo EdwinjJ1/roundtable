@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createChat } from '../src/server/actions/chat-actions.js';
 import { pinWorkbench } from '../src/server/actions/memory-actions.js';
-import { upsertUserSkill } from '../src/server/actions/skill-actions.js';
+import { setUserSkillEnabled, upsertUserSkill } from '../src/server/actions/skill-actions.js';
 import { createTurn } from '../src/server/actions/turn-actions.js';
 import { createWorkbench } from '../src/server/actions/workbench-actions.js';
 import { resetData } from '../src/server/store.js';
@@ -48,6 +48,18 @@ describe('User skills', () => {
       source: 'observed',
       evidence: 'User wants a plan before changes.',
     });
+    await setUserSkillEnabled(actor, {
+      key: 'plan_before_implementation',
+      enabled: false,
+    });
+    const updatedSkill = await upsertUserSkill(actor, {
+      key: 'plan_before_implementation',
+      evidence: 'Updated evidence should not override disabled state.',
+    });
+    await setUserSkillEnabled(actor, {
+      key: 'plan_before_implementation',
+      enabled: true,
+    });
     await pinWorkbench(actor, {
       workbenchId: workbench.id,
       content: 'Show visual approval before marking UI work done.',
@@ -59,6 +71,7 @@ describe('User skills', () => {
       message: 'Build a profile settings UI and review it.',
     });
 
+    expect(updatedSkill.enabled).toBe(false);
     expect(turn.mission?.workingStyle.skills.map((skill) => skill.key)).toContain('plan_before_implementation');
     expect(turn.mission?.workingStyle.projectRules).toContain('Show visual approval before marking UI work done.');
     expect(turn.plan.tasks[0]?.brief).toContain('Plan before implementation');

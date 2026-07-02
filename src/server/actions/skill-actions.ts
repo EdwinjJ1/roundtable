@@ -147,7 +147,7 @@ export async function upsertUserSkill(actor: Actor, input: SkillInput): Promise<
       skill.description = input.description?.trim() || skill.description || catalog.description;
       skill.source = input.source ?? skill.source;
       skill.scope = input.scope ?? skill.scope;
-      skill.enabled = input.enabled ?? true;
+      skill.enabled = input.enabled ?? skill.enabled;
       skill.evidence = input.evidence ?? skill.evidence;
       skill.updatedAt = now;
     }

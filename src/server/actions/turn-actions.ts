@@ -444,6 +444,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
         turnId: turn.id,
         missionId: turn.missionId,
         goal: turn.message,
+        workingStyle: turn.workingStyle,
         plan: turn.plan,
         needsClarification: turn.needsClarification,
         workflowTemplateId: turn.workflowTemplateId,
