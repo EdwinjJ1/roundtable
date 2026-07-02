@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import type { FormEvent } from 'react';
+import type { FormEvent, MouseEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { signIn } from 'next-auth/react';
@@ -28,6 +28,7 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
   const [workspaceName, setWorkspaceName] = useState('Product Squad');
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
+  const [pointer, setPointer] = useState({ x: 0, y: 0, active: false });
   const isSignup = mode === 'signup';
   const target = useMemo(() => {
     if (!callbackUrl || callbackUrl.startsWith('/api/auth')) return '/';
@@ -56,6 +57,15 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
     router.push(result?.url || target);
   };
 
+  const moveStage = (event: MouseEvent<HTMLElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setPointer({
+      x: ((event.clientX - rect.left) / rect.width - 0.5) * 2,
+      y: ((event.clientY - rect.top) / rect.height - 0.5) * 2,
+      active: true,
+    });
+  };
+
   return (
     <main style={{
       minHeight: '100vh', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)',
@@ -66,11 +76,15 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
         width: 'min(1080px, 100%)', margin: 'auto', display: 'grid',
         gridTemplateColumns: 'minmax(0, 1.05fr) minmax(340px, .8fr)', gap: 18,
       }}>
-        <section style={{
+        <section
+          onMouseMove={moveStage}
+          onMouseLeave={() => setPointer({ x: 0, y: 0, active: false })}
+          style={{
           minHeight: 560, border: '1px solid var(--border)', borderRadius: 'var(--r-card)',
           background: 'color-mix(in oklab, var(--surface) 82%, transparent)',
           boxShadow: 'var(--shadow-pop)', overflow: 'hidden', position: 'relative',
         }}>
+          <style>{authMotionStyles}</style>
           <div style={{ position: 'absolute', inset: 0, background:
             'linear-gradient(145deg, color-mix(in oklab, var(--surface) 90%, transparent), color-mix(in oklab, var(--surface-2) 86%, transparent))' }} />
           <div style={{ position: 'relative', height: '100%', padding: 26, display: 'flex', flexDirection: 'column' }}>
@@ -89,9 +103,10 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
               <div style={{ position: 'relative', width: 'min(520px, 88vw)', aspectRatio: '1.2 / 1' }}>
                 <div style={{
                   position: 'absolute', left: '14%', right: '14%', top: '28%', height: '34%',
-                  borderRadius: '50%', background: 'var(--surface)',
+                  borderRadius: '50%', background: `radial-gradient(circle at ${50 + pointer.x * 12}% ${42 + pointer.y * 12}%, color-mix(in oklab, var(--accent) ${pointer.active ? 14 : 7}%, var(--surface)), var(--surface) 58%)`,
                   border: '1px solid var(--border)',
-                  boxShadow: 'inset 0 -24px 34px -30px rgba(40,40,70,.38), 0 24px 70px -42px rgba(40,40,70,.55)',
+                  boxShadow: `inset ${pointer.x * -8}px ${pointer.y * -5}px 34px -30px rgba(40,40,70,.38), 0 24px 70px -42px rgba(40,40,70,.55)`,
+                  transition: 'background .18s ease, box-shadow .18s ease',
                 }} />
                 <div style={{
                   position: 'absolute', left: '28%', right: '28%', top: '39%', height: '13%',
@@ -105,27 +120,33 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
                     { left: '12%', top: '33%' },
                   ];
                   return (
-                    <div key={agent.name} style={{
+                    <div key={agent.name} className="auth-agent" style={{
                       position: 'absolute', ...positions[index], width: 86, textAlign: 'center',
-                      transform: 'translateX(-50%)',
+                      transform: `translate(calc(-50% + ${pointer.x * (7 + index * 1.4)}px), ${pointer.y * (5 - index * .45)}px) rotate(${pointer.x * (2.3 - index * .25)}deg)`,
+                      transition: 'transform .16s ease-out',
                     }}>
-                      <div style={{
+                      <div className="auth-avatar" style={{
                         width: 56, height: 56, margin: '0 auto 9px', borderRadius: '50%',
                         background: 'var(--surface)', overflow: 'hidden',
                         boxShadow: `0 0 0 3px var(--surface), 0 0 0 5px ${agent.ring}, 0 12px 28px -18px rgba(40,40,70,.55)`,
                       }}>
                         <img src={agent.src} alt="" width={56} height={56}
-                          style={{ display: 'block', width: 56, height: 56, objectFit: 'cover' }} />
+                          className="auth-avatar-img"
+                          style={{ display: 'block', width: 56, height: 56, objectFit: 'cover',
+                            transform: `translate(${pointer.x * (1.5 + index * .3)}px, ${pointer.y * 1.2}px) scale(1.04)` }} />
+                        <span className="auth-blink" style={{ animationDelay: `${index * 1.25}s` }} />
                       </div>
                       <div style={{ fontSize: 12.5, fontWeight: 700 }}>{agent.name}</div>
                     </div>
                   );
                 })}
                 <div style={{
-                  position: 'absolute', left: '50%', top: '43%', transform: 'translate(-50%, -50%)',
+                  position: 'absolute', left: '50%', top: '43%',
+                  transform: `translate(calc(-50% + ${pointer.x * 4}px), calc(-50% + ${pointer.y * 3}px))`,
                   padding: '8px 12px', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)',
                   border: '1px solid var(--border)', color: 'var(--text-muted)', fontSize: 12.5,
                   boxShadow: 'var(--shadow-card)',
+                  transition: 'transform .16s ease-out',
                 }}>
                   Product Squad
                 </div>
@@ -274,3 +295,63 @@ const inputStyle = {
   fontSize: 14,
   outline: 'none',
 };
+
+const authMotionStyles = `
+  .auth-agent {
+    will-change: transform;
+  }
+
+  .auth-avatar {
+    position: relative;
+    transition: transform .18s ease, box-shadow .18s ease;
+    animation: auth-float 5.8s ease-in-out infinite;
+    will-change: transform;
+  }
+
+  .auth-agent:hover .auth-avatar {
+    transform: translateY(-5px) scale(1.055);
+  }
+
+  .auth-avatar-img {
+    transition: transform .16s ease-out;
+    will-change: transform;
+  }
+
+  .auth-blink {
+    position: absolute;
+    left: 18%;
+    right: 18%;
+    top: 42%;
+    height: 0;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--surface) 88%, #fff 12%);
+    box-shadow: 0 0 0 1px rgba(255,255,255,.45);
+    opacity: 0;
+    pointer-events: none;
+    animation: auth-blink 6.2s infinite;
+  }
+
+  @keyframes auth-float {
+    0%, 100% { translate: 0 0; }
+    50% { translate: 0 -3px; }
+  }
+
+  @keyframes auth-blink {
+    0%, 90%, 100% { opacity: 0; height: 0; transform: scaleY(.2); }
+    92% { opacity: .86; height: 13px; transform: scaleY(1); }
+    94% { opacity: .86; height: 2px; transform: scaleY(.28); }
+    96% { opacity: 0; height: 0; transform: scaleY(.2); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .auth-avatar,
+    .auth-blink {
+      animation: none;
+    }
+    .auth-agent,
+    .auth-avatar,
+    .auth-avatar-img {
+      transition: none;
+    }
+  }
+`;
