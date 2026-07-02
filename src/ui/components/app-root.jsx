@@ -6,7 +6,7 @@
 
 import React from 'react';
 import { RT } from '../lib/rt';
-import { Avatar, Icon, Spinner, tint, alpha } from './primitives';
+import { Avatar, Icon, Spinner, Md, tint, alpha } from './primitives';
 import { iconBtn } from './cards';
 import { ConversationRail, LogoMark } from './chat';
 import { RoundtableScene, WhiteboardZoom, sceneAt } from './roundtable';
@@ -303,59 +303,181 @@ function BreakoutsHub({ agents, memberIds, autoRoom, onEnterAuto, onStartDM, onC
   );
 }
 
-/* ---- DMRoom : a private 1:1 side room (You ↔ agent), doubles as steering -- */
-function DMRoom({ agent, activeTask, onClose }) {
+/* ---- agentWorkFor : collect one agent's tasks + produced artifacts from the
+   latest run, so DMRoom's "Work" tab shows what they actually did (not a mock).
+   Owner match is by agentId on both the plan task and the artifact. -------- */
+function agentWorkFor(agentId, turnResult) {
+  if (!agentId || !turnResult) return { tasks: [], artifacts: [] };
+  const tasks = (turnResult.plan?.tasks || []).filter((task) => task.owner === agentId);
+  const ownedTaskIds = new Set(tasks.map((task) => task.id));
+  const records = new Map((turnResult.dispatch || []).map((rec) => [rec.taskId, rec]));
+  const artifacts = (turnResult.artifacts || []).filter((art) =>
+    art.ownerAgentId === agentId
+    || [...ownedTaskIds].some((taskId) => art.id.startsWith(`${taskId}_`)),
+  );
+  return {
+    tasks: tasks.map((task) => ({ ...task, status: records.get(task.id)?.status || 'pending' })),
+    artifacts,
+  };
+}
+
+const DM_WORK_STATUS = {
+  completed: { label: 'done', color: 'var(--ok)' },
+  failed: { label: 'failed', color: 'var(--bad)' },
+  blocked: { label: 'blocked', color: 'var(--warn)' },
+  running: { label: 'working', color: 'var(--run)' },
+  pending: { label: 'queued', color: 'var(--text-faint)' },
+};
+
+// The "Work" tab: this agent's task(s) and the deliverables they produced, each
+// expandable to read the real content (HTML renders in an iframe, text as md).
+function DMWorkPanel({ agent, work }) {
+  const { tasks, artifacts } = work;
+  if (tasks.length === 0 && artifacts.length === 0) {
+    return (
+      <div style={{ fontSize: 12.5, color: 'var(--text-faint)', fontStyle: 'italic', padding: '4px 2px' }}>
+        {agent.displayName} hasn’t produced anything on this run yet.
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'grid', gap: 12 }}>
+      {tasks.length > 0 && (
+        <div style={{ display: 'grid', gap: 6 }}>
+          {tasks.map((task) => {
+            const st = DM_WORK_STATUS[task.status] || DM_WORK_STATUS.pending;
+            return (
+              <div key={task.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 10px',
+                borderRadius: 'var(--r-sm)', background: 'var(--surface)', border: '1px solid var(--border)' }}>
+                <span style={{ marginTop: 2, width: 8, height: 8, borderRadius: '50%', background: st.color, flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text)' }}>{task.title}</div>
+                  {task.brief && <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 2 }}>{task.brief}</div>}
+                </div>
+                <span style={{ fontSize: 10.5, fontWeight: 700, color: st.color }}>{st.label}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {artifacts.length > 0 && (
+        <div style={{ display: 'grid', gap: 6 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.05em', textTransform: 'uppercase',
+            color: 'var(--text-faint)' }}>Deliverables</div>
+          {artifacts.map((art) => <DMArtifact key={`${art.id}-${art.version}`} artifact={art} agent={agent} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DMArtifact({ artifact, agent }) {
+  const [open, setOpen] = useState(false);
+  const content = artifact.preview || artifact.code || '';
+  const isHtml = artifact.kind === 'html' || artifact.kind === 'preview';
+  return (
+    <div style={{ borderRadius: 'var(--r-sm)', background: tint(agent.color, 7),
+      border: `1px solid ${alpha(agent.color, 22)}`, overflow: 'hidden' }}>
+      <button onClick={() => setOpen((v) => !v)} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+        padding: '8px 10px', background: 'transparent', border: 'none', cursor: 'pointer', font: 'inherit', textAlign: 'left' }}>
+        <Icon name={open ? 'chevdown' : 'chevron'} size={12} style={{ color: agent.color }} />
+        <Icon name={artifact.kind === 'preview' ? 'eye' : artifact.kind === 'markdown' ? 'clip' : 'code'} size={13}
+          style={{ color: agent.color }} />
+        <span className="mono" style={{ flex: 1, minWidth: 0, fontSize: 12, color: 'var(--text)', overflow: 'hidden',
+          textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{artifact.title}</span>
+      </button>
+      {open && (
+        <div style={{ borderTop: `1px solid ${alpha(agent.color, 22)}`, background: 'var(--bg)', padding: '10px 12px',
+          maxHeight: 300, overflowY: 'auto' }}>
+          {!content
+            ? <div style={{ fontSize: 12, color: 'var(--text-faint)', fontStyle: 'italic' }}>No content captured.</div>
+            : isHtml
+            ? <iframe title={artifact.title} srcDoc={content} sandbox="allow-scripts"
+                style={{ width: '100%', height: 260, border: 'none', background: '#fff', borderRadius: 6 }} />
+            : <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--text)' }}><Md text={content} /></div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---- DMRoom : click an agent to open their 1:1 room. Two tabs — Chat (steer /
+   private note) and Work (what they actually produced on this run). --------- */
+function DMRoom({ agent, activeTask, work, onClose }) {
   if (!agent) return null;
+  const [tab, setTab] = useState('chat');
   const [val, setVal] = useState('');
   const steering = !!activeTask;
   const redirects = ['Use Postgres, not SQLite', 'Add rate limiting', 'Keep it server-rendered'];
+  const workCount = (work?.tasks?.length || 0) + (work?.artifacts?.length || 0);
+  const tabBtn = (id, label, count) => (
+    <button onClick={() => setTab(id)} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px',
+      borderRadius: 999, cursor: 'pointer', font: 'inherit', fontSize: 12, fontWeight: 700,
+      border: '1px solid ' + (tab === id ? alpha(agent.color, 40) : 'var(--border)'),
+      background: tab === id ? tint(agent.color, 12) : 'var(--surface)',
+      color: tab === id ? agent.color : 'var(--text-muted)' }}>
+      {label}
+      {count > 0 && <span style={{ fontSize: 10.5, fontWeight: 800, padding: '0 6px', borderRadius: 999,
+        background: tab === id ? alpha(agent.color, 22) : 'var(--surface-3)', color: tab === id ? agent.color : 'var(--text-faint)' }}>{count}</span>}
+    </button>
+  );
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 115, background: alpha('#000', 34),
       backdropFilter: 'blur(2px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-      <div onClick={(e) => e.stopPropagation()} className="rt-zoom" style={{ width: 'min(460px, 100%)', height: 'min(560px, 86vh)',
+      <div onClick={(e) => e.stopPropagation()} className="rt-zoom" style={{ width: 'min(480px, 100%)', height: 'min(600px, 88vh)',
         display: 'flex', flexDirection: 'column', background: 'var(--surface)', borderRadius: 'var(--r-card)',
         border: '1px solid var(--border)', borderTop: `2.5px solid ${agent.color}`, boxShadow: 'var(--shadow-pop)', overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 15px', borderBottom: '1px solid var(--border)' }}>
-          <span style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, borderRadius: 7, background: 'var(--surface-2)',
-            color: 'var(--text-muted)' }}><Icon name={steering ? 'wrench' : 'door'} size={14} /></span>
           <Avatar agent={agent} size={28} />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600 }}>{steering ? 'Steer' : 'Private'} · {agent.displayName}</div>
-            <div style={{ fontSize: 11, color: 'var(--text-faint)' }}>{steering ? 'redirect them mid-task' : 'just you two — off the main table'}</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600 }}>{agent.displayName}</div>
+            <div className="mono" style={{ fontSize: 11, color: 'var(--text-faint)' }}>@{agent.role || agent.id}</div>
           </div>
           <button onClick={onClose} style={iconBtn}><Icon name="x" size={15} /></button>
         </div>
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 15px', display: 'flex', flexDirection: 'column', gap: 12, background: 'var(--bg)' }}>
-          {steering && (
-            <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start', padding: '10px 12px', borderRadius: 'var(--r-sm)',
-              background: tint(agent.color, 9), border: `1px solid ${alpha(agent.color, 35)}` }}>
-              <Spinner size={15} color={agent.color} />
-              <div style={{ fontSize: 12.5, color: 'var(--text)' }}>
-                <b>Working on {activeTask}</b> right now. A note here steers the live task without stopping the table.</div>
+        <div style={{ display: 'flex', gap: 7, padding: '10px 15px 4px' }}>
+          {tabBtn('chat', steering ? 'Steer' : 'Chat')}
+          {tabBtn('work', 'Work', workCount)}
+        </div>
+        {tab === 'work' ? (
+          <div style={{ flex: 1, overflowY: 'auto', padding: '12px 15px 16px', background: 'var(--bg)' }}>
+            <DMWorkPanel agent={agent} work={work || { tasks: [], artifacts: [] }} />
+          </div>
+        ) : (
+          <>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '16px 15px', display: 'flex', flexDirection: 'column', gap: 12, background: 'var(--bg)' }}>
+              {steering && (
+                <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start', padding: '10px 12px', borderRadius: 'var(--r-sm)',
+                  background: tint(agent.color, 9), border: `1px solid ${alpha(agent.color, 35)}` }}>
+                  <Spinner size={15} color={agent.color} />
+                  <div style={{ fontSize: 12.5, color: 'var(--text)' }}>
+                    <b>Working on {activeTask}</b> right now. A note here steers the live task without stopping the table.</div>
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 9 }}>
+                <Avatar agent={agent} size={26} />
+                <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '4px 12px 12px 12px',
+                  padding: '9px 12px', fontSize: 13.5, color: 'var(--text)', maxWidth: '80%' }}>
+                  {steering ? 'Mid-build — tell me what to change and I’ll fold it in.' : 'Hey — what would you like to go over, just the two of us?'}</div>
+              </div>
             </div>
-          )}
-          <div style={{ display: 'flex', gap: 9 }}>
-            <Avatar agent={agent} size={26} />
-            <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '4px 12px 12px 12px',
-              padding: '9px 12px', fontSize: 13.5, color: 'var(--text)', maxWidth: '80%' }}>
-              {steering ? 'Mid-build — tell me what to change and I’ll fold it in.' : 'Hey — what would you like to go over, just the two of us?'}</div>
-          </div>
-        </div>
-        {steering && (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '0 13px 4px' }}>
-            {redirects.map((r) => (
-              <button key={r} onClick={() => setVal(r)} style={{ padding: '5px 10px', borderRadius: 999, cursor: 'pointer',
-                border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-muted)', font: 'inherit', fontSize: 11.5 }}>{r}</button>
-            ))}
-          </div>
+            {steering && (
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '0 13px 4px' }}>
+                {redirects.map((r) => (
+                  <button key={r} onClick={() => setVal(r)} style={{ padding: '5px 10px', borderRadius: 999, cursor: 'pointer',
+                    border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-muted)', font: 'inherit', fontSize: 11.5 }}>{r}</button>
+                ))}
+              </div>
+            )}
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 9, padding: '11px 13px', borderTop: '1px solid var(--border)' }}>
+              <textarea value={val} onChange={(e) => setVal(e.target.value)} rows={1} placeholder={steering ? `Redirect ${agent.displayName}…` : `Message ${agent.displayName} privately…`}
+                style={{ flex: 1, resize: 'none', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)',
+                  font: 'inherit', fontSize: 13.5, color: 'var(--text)', padding: '9px 11px', outline: 'none', maxHeight: 100 }} />
+              <button onClick={() => setVal('')} style={{ display: 'grid', placeItems: 'center', width: 38, height: 38, borderRadius: 'var(--r-sm)',
+                border: 'none', cursor: 'pointer', background: 'var(--accent)', color: '#fff', flexShrink: 0 }}><Icon name="send" size={16} /></button>
+            </div>
+          </>
         )}
-        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 9, padding: '11px 13px', borderTop: '1px solid var(--border)' }}>
-          <textarea value={val} onChange={(e) => setVal(e.target.value)} rows={1} placeholder={steering ? `Redirect ${agent.displayName}…` : `Message ${agent.displayName} privately…`}
-            style={{ flex: 1, resize: 'none', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)',
-              font: 'inherit', fontSize: 13.5, color: 'var(--text)', padding: '9px 11px', outline: 'none', maxHeight: 100 }} />
-          <button onClick={() => setVal('')} style={{ display: 'grid', placeItems: 'center', width: 38, height: 38, borderRadius: 'var(--r-sm)',
-            border: 'none', cursor: 'pointer', background: 'var(--accent)', color: '#fff', flexShrink: 0 }}><Icon name="send" size={16} /></button>
-        </div>
       </div>
     </div>
   );
@@ -1059,6 +1181,7 @@ function App() {
         onStartDM={(id) => { setHubOpen(false); setDmAgent(id); }} onClose={() => setHubOpen(false)} />}
       {dmAgent && <DMRoom agent={agents[dmAgent]}
         activeTask={(['working', 'speaking', 'thinking'].includes(st.status[dmAgent])) ? (RT.PLAN.tasks.find((tk) => tk.owner === dmAgent) || {}).id : null}
+        work={agentWorkFor(dmAgent, latestTurnResult)}
         onClose={() => setDmAgent(null)} />}
       {modal === 'task' && <NewTaskModal workbench={railWorkbench} members={memberIds} agents={agents}
         suggestionContext={missionSuggestionContext}
