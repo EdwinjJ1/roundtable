@@ -214,10 +214,10 @@ function e2bAgentEnv(): Record<string, string> {
 // same prompts, same deliverable extraction, same failure semantics. Only the
 // transport call and display metadata differ per provider.
 type ChatModelRun = (input: {
-  messages: Array<{ role: 'system' | 'user'; content: string }>;
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   timeoutMs: number;
-  maxTokens: number;
-}) => Promise<{ text: string; usage?: Record<string, unknown> | undefined }>;
+  maxTokens?: number | undefined;
+}) => Promise<{ text: string; usage?: Record<string, unknown> | undefined; finishReason?: string | undefined }>;
 
 async function runChatModelTask(
   input: {
@@ -265,23 +265,45 @@ async function runChatModelTask(
   };
 
   try {
-    const run = await provider.run({
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-      timeoutMs: timeoutMs(),
-      // A full page routinely exceeds the 8192 default and comes back truncated
-      // mid-tag; extraction keeps it renderable, but the real ceiling is set
-      // here (tune per provider limit).
-      maxTokens: modelMaxTokens(),
-    });
-    // Extraction is strict on purpose: a .html artifact holding prose or a raw
-    // fence is worse than a failed task, because a failure feeds the review→fix
-    // loop while a garbage artifact ships as "completed".
-    const text = deliverableText(run.text, path);
+    // Deliverables (full HTML pages especially) routinely exceed one response's
+    // token ceiling and come back cut mid-tag — the model writes <head> CSS
+    // first, so a single truncated response renders as a BLANK page. When the
+    // provider reports finish_reason=length, ask it to continue from the exact
+    // cut point and stitch the halves, bounded by maxModelContinuations().
+    let messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ];
+    let combined = '';
+    let run: Awaited<ReturnType<ChatModelRun>>;
+    let rounds = 0;
+    do {
+      run = await provider.run({
+        messages,
+        timeoutMs: timeoutMs(),
+        maxTokens: modelMaxTokens(),
+      });
+      combined += run.text;
+      if (run.finishReason !== 'length') break;
+      messages = [
+        ...messages,
+        { role: 'assistant', content: run.text },
+        {
+          role: 'user',
+          content: 'Your previous output was cut off mid-way. Continue EXACTLY from where it stopped. '
+            + 'Do not repeat anything you already wrote, do not add any preamble or code fences — '
+            + 'output only the remaining content.',
+        },
+      ];
+      rounds += 1;
+    } while (rounds <= maxModelContinuations());
+    // Extraction is strict on purpose: a .html artifact holding prose, a raw
+    // fence, or a page cut before <body> is worse than a failed task, because a
+    // failure feeds the review→fix loop while a garbage artifact ships as
+    // "completed".
+    const text = deliverableText(combined, path);
     if (text === null || text.length === 0) {
-      return failure('deliverable_not_usable', run.text);
+      return failure('deliverable_not_usable', combined);
     }
     await writeWorkspaceFile(input.workspace, path, text);
     const reasoningTokens = (run.usage?.['completion_tokens_details'] as { reasoning_tokens?: number } | undefined)?.reasoning_tokens;
@@ -582,7 +604,9 @@ function chatAgentPrompt(
     pm: 'State the product intent, constraints, and acceptance criteria as Markdown.',
     architect: 'Describe the technical approach, key interfaces, and risks as Markdown.',
     implementer: isHtml
-      ? 'Output a COMPLETE, self-contained HTML document (with inline CSS/JS) that fulfills the task. Output only the HTML, no prose, no code fences.'
+      ? 'Output a COMPLETE, self-contained HTML document (with inline CSS/JS) that fulfills the task. '
+        + 'Keep the CSS lean: the ENTIRE document including the full <body> must fit in your response — '
+        + 'a page with elaborate styles but no body content is a failure. Output only the HTML, no prose, no code fences.'
       : 'Output the complete deliverable content directly (code or Markdown). Do not describe what you would do — produce it.',
     reviewer: 'Review the upstream deliverable. Output a Markdown report: concrete issues, risks, and missing pieces, each with severity. If it is solid, say so explicitly.',
     fixer: isHtml
@@ -613,11 +637,19 @@ function timeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 120_000;
 }
 
-// Output ceiling for chat model deliverables. Full HTML pages routinely exceed
-// the common 8192 default; raise it to whatever the configured provider allows.
-function modelMaxTokens(): number {
+// Optional output ceiling for chat model deliverables. Unset by default: the
+// provider's own limit applies, and length-cut responses are stitched back
+// together by the continuation loop in runChatModelTask.
+function modelMaxTokens(): number | undefined {
   const parsed = Number(process.env.ROUNDTABLE_MODEL_MAX_TOKENS);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 8192;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+// How many "continue from where you stopped" rounds a single deliverable may
+// use when the provider reports finish_reason=length (default 2).
+function maxModelContinuations(): number {
+  const parsed = Number(process.env.ROUNDTABLE_MODEL_MAX_CONTINUATIONS);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2;
 }
 
 async function runCommand(

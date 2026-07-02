@@ -28,6 +28,9 @@ export type MiniMaxRunOutput = {
   reasoning?: string | undefined;
   raw: string;
   usage?: Record<string, unknown> | undefined;
+  // 'length' means the output was cut at the token ceiling — callers can issue
+  // a continuation request instead of shipping a truncated deliverable.
+  finishReason?: string | undefined;
 };
 
 export class MiniMaxUnavailableError extends Error {
@@ -94,7 +97,10 @@ export async function runOnMiniMax(input: MiniMaxRunInput): Promise<MiniMaxRunOu
       body: JSON.stringify({
         model: miniMaxModel(),
         messages: input.messages,
-        max_tokens: input.maxTokens ?? 8192,
+        // Omit max_tokens unless explicitly configured: the provider's own
+        // ceiling is usually higher than any hardcoded default, and truncation
+        // is handled by continuation upstream.
+        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
         temperature: input.temperature ?? 0.7,
         stream: false,
         // Default to no reasoning so the deliverable comes back clean and fast;
@@ -112,7 +118,7 @@ export async function runOnMiniMax(input: MiniMaxRunInput): Promise<MiniMaxRunOu
   }
 
   const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+    choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
     usage?: Record<string, unknown>;
     base_resp?: { status_code?: number; status_msg?: string };
     error?: { message?: string };
@@ -128,7 +134,8 @@ export async function runOnMiniMax(input: MiniMaxRunInput): Promise<MiniMaxRunOu
     );
   }
 
-  const raw = data.choices?.[0]?.message?.content ?? '';
+  const choice = data.choices?.[0];
+  const raw = choice?.message?.content ?? '';
   const [text, reasoning] = stripThink(raw);
-  return { text: text || raw, reasoning, raw, usage: data.usage };
+  return { text: text || raw, reasoning, raw, usage: data.usage, finishReason: choice?.finish_reason };
 }

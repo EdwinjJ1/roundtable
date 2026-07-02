@@ -14,12 +14,15 @@
  * Slice a complete-or-truncated HTML document out of a model response.
  * Tolerates markdown fences, prose before/after, and missing </html> (a
  * truncated page still renders — browsers auto-close). Returns null when the
- * response contains no HTML document at all.
+ * response contains no HTML document, or when the document has no <body>: a
+ * page cut off while still inside <head> is valid HTML that renders as a
+ * blank screen, which is worse than failing the task.
  */
 export function extractHtmlDocument(raw: string): string | null {
   const startMatch = raw.match(/<!doctype\s+html[^>]*>|<html[\s>]/i);
   if (startMatch === null || startMatch.index === undefined) return null;
   const fromStart = raw.slice(startMatch.index);
+  if (!/<body[\s>]/i.test(fromStart)) return null;
   const endMatch = fromStart.match(/<\/html>/i);
   const document = endMatch?.index !== undefined
     ? fromStart.slice(0, endMatch.index + endMatch[0].length)

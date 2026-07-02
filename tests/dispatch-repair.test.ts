@@ -158,10 +158,24 @@ describe('runAgentTask — chat model deliverable extraction', () => {
   });
 
   function stubModelResponse(content: string): void {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(
-      JSON.stringify({ choices: [{ message: { content } }], usage: {} }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    )));
+    stubModelResponses([{ content, finishReason: 'stop' }]);
+  }
+
+  function stubModelResponses(turns: Array<{ content: string; finishReason: string }>): ReturnType<typeof vi.fn> {
+    let call = 0;
+    const mock = vi.fn(async () => {
+      const turn = turns[Math.min(call, turns.length - 1)]!;
+      call += 1;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: turn.content }, finish_reason: turn.finishReason }],
+          usage: {},
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', mock);
+    return mock;
   }
 
   const htmlTask = () => task({
@@ -174,7 +188,8 @@ describe('runAgentTask — chat model deliverable extraction', () => {
   });
 
   it('recovers a fenced, truncated HTML response into a clean document', async () => {
-    stubModelResponse('```html\n<!DOCTYPE html>\n<html><head><style>.item { font-size');
+    // Fence + cut after body content started: renderable, so keep it clean.
+    stubModelResponse('```html\n<!DOCTYPE html>\n<html><head></head><body><h1>真鲜</h1><p>每一天，从产地到');
     const result = await runAgentTask({
       adapter: 'openai-compat',
       workspace: tempDir,
@@ -189,6 +204,45 @@ describe('runAgentTask — chat model deliverable extraction', () => {
 
   it('fails the task when the model returns prose instead of a page', async () => {
     stubModelResponse('抱歉，我无法生成这个页面。');
+    const result = await runAgentTask({
+      adapter: 'openai-compat',
+      workspace: tempDir,
+      task: htmlTask(),
+      message: '做一个火锅店网站',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('deliverable_not_usable');
+  });
+
+  it('auto-continues when the model output is cut at the token ceiling', async () => {
+    // First response ends mid-CSS inside <head> (the blank-page production
+    // failure); the continuation completes the body. The stitched document
+    // must contain both halves.
+    const mock = stubModelResponses([
+      { content: '<!DOCTYPE html>\n<html><head><style>.hero { color: red', finishReason: 'length' },
+      { content: '; }</style></head><body><h1>真鲜火锅</h1></body></html>', finishReason: 'stop' },
+    ]);
+    const result = await runAgentTask({
+      adapter: 'openai-compat',
+      workspace: tempDir,
+      task: htmlTask(),
+      message: '做一个火锅店网站',
+    });
+    expect(mock).toHaveBeenCalledTimes(2);
+    expect(result.ok).toBe(true);
+    expect(result.text).toContain('<h1>真鲜火锅</h1>');
+    expect(result.text).toContain('.hero { color: red; }');
+    expect(result.text.endsWith('</html>')).toBe(true);
+  });
+
+  it('fails rather than shipping a blank page when continuations run out', async () => {
+    // Every response is length-cut inside <head>: no <body> ever appears. The
+    // task must fail (feeding the fix loop), never complete with a blank page.
+    stubModelResponses([
+      { content: '<!DOCTYPE html>\n<html><head><style>.a { color: red', finishReason: 'length' },
+      { content: '; } .b { margin: 0', finishReason: 'length' },
+      { content: '; } .c { padding: 0', finishReason: 'length' },
+    ]);
     const result = await runAgentTask({
       adapter: 'openai-compat',
       workspace: tempDir,

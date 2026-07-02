@@ -16,13 +16,20 @@ describe('extractHtmlDocument — tolerant of fences, prose, and truncation', ()
     expect(extractHtmlDocument('```html\n' + PAGE + '\n```')).toBe(PAGE);
   });
 
-  it('recovers from an UNTERMINATED fence (truncated model output)', () => {
-    // The exact failure seen in production: fence opened, output cut mid-CSS.
-    const truncated = '```html\n<!DOCTYPE html>\n<html><head><style>.item { font-size';
+  it('recovers a truncated page as long as visible content exists', () => {
+    // Cut after the body opened: incomplete but renderable — keep it.
+    const truncated = '```html\n<!DOCTYPE html>\n<html><head></head><body><h1>真鲜</h1><p>每一天，从产地到';
     const extracted = extractHtmlDocument(truncated);
     expect(extracted).not.toBeNull();
     expect(extracted!.startsWith('<!DOCTYPE html>')).toBe(true);
     expect(extracted).not.toContain('```');
+  });
+
+  it('rejects a page cut before <body> — it renders as a blank screen', () => {
+    // The exact production failure: the model wrote a giant <style> block and
+    // hit the token ceiling while still inside <head>. Valid HTML, zero pixels.
+    const headOnly = '<!DOCTYPE html>\n<html><head><style>.back-top { bottom: 20';
+    expect(extractHtmlDocument(headOnly)).toBeNull();
   });
 
   it('drops prose before and after the document', () => {

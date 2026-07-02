@@ -32,6 +32,9 @@ export type OpenAICompatRunOutput = {
   reasoning?: string | undefined;
   raw: string;
   usage?: Record<string, unknown> | undefined;
+  // 'length' means the output was cut at the token ceiling — callers can issue
+  // a continuation request instead of shipping a truncated deliverable.
+  finishReason?: string | undefined;
 };
 
 export class OpenAICompatUnavailableError extends Error {
@@ -92,7 +95,10 @@ export async function runOnOpenAICompat(input: OpenAICompatRunInput): Promise<Op
       body: JSON.stringify({
         model: openAICompatModel(),
         messages: input.messages,
-        max_tokens: input.maxTokens ?? 8192,
+        // Omit max_tokens unless explicitly configured: the provider's own
+        // ceiling is usually higher than any hardcoded default, and truncation
+        // is handled by continuation upstream.
+        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
         temperature: input.temperature ?? 0.7,
         stream: false,
       }),
@@ -106,7 +112,7 @@ export async function runOnOpenAICompat(input: OpenAICompatRunInput): Promise<Op
   }
 
   const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
+    choices?: Array<{ message?: { content?: string; reasoning_content?: string }; finish_reason?: string }>;
     usage?: Record<string, unknown>;
     error?: { message?: string };
     // Some providers (e.g. MiniMax) surface app-level errors on HTTP 200.
@@ -122,8 +128,8 @@ export async function runOnOpenAICompat(input: OpenAICompatRunInput): Promise<Op
     );
   }
 
-  const message = data.choices?.[0]?.message;
-  const raw = message?.content ?? '';
-  const reasoning = message?.reasoning_content?.trim() || undefined;
-  return { text: raw.trim(), reasoning, raw, usage: data.usage };
+  const choice = data.choices?.[0];
+  const raw = choice?.message?.content ?? '';
+  const reasoning = choice?.message?.reasoning_content?.trim() || undefined;
+  return { text: raw.trim(), reasoning, raw, usage: data.usage, finishReason: choice?.finish_reason };
 }
