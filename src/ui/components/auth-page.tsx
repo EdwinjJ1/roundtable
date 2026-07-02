@@ -102,20 +102,20 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
             <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}>
               <div style={{ position: 'relative', width: 'min(520px, 88vw)', aspectRatio: '1.2 / 1' }}>
                 <div style={{
-                  position: 'absolute', left: '12%', right: '12%', top: '55%', height: '17%',
+                  position: 'absolute', left: '18%', right: '18%', top: '56%', height: '15%',
                   borderRadius: '50%', background: 'rgba(40,40,70,.20)',
                   filter: 'blur(26px)', opacity: .55,
                   transform: `translate(${pointer.x * 5}px, ${pointer.y * 4}px)`,
                   transition: 'transform .18s ease-out',
                 }} />
                 <div style={{
-                  position: 'absolute', left: '13%', right: '13%', top: '38%', height: '29%',
+                  position: 'absolute', left: '18%', right: '18%', top: '39%', height: '26%',
                   borderRadius: '50%',
                   background: 'linear-gradient(180deg, color-mix(in oklab, var(--surface-3) 74%, #fff 10%), color-mix(in oklab, var(--surface-3) 82%, #000 7%))',
                   boxShadow: 'inset 0 -18px 26px -23px rgba(40,40,70,.52)',
                 }} />
                 <div style={{
-                  position: 'absolute', left: '12%', right: '12%', top: '31%', height: '31%',
+                  position: 'absolute', left: '17%', right: '17%', top: '32%', height: '28%',
                   borderRadius: '50%',
                   background: `radial-gradient(circle at ${48 + pointer.x * 13}% ${35 + pointer.y * 10}%, color-mix(in oklab, var(--accent) ${pointer.active ? 13 : 7}%, #fff), color-mix(in oklab, var(--surface) 96%, #fff 4%) 44%, var(--surface-2) 100%)`,
                   border: '1px solid color-mix(in oklab, var(--border-strong) 72%, transparent)',
@@ -123,13 +123,13 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
                   transition: 'background .18s ease, box-shadow .18s ease',
                 }} />
                 <div style={{
-                  position: 'absolute', left: '20%', right: '20%', top: '39%', height: '14%',
+                  position: 'absolute', left: '29%', right: '29%', top: '40%', height: '12%',
                   borderRadius: '50%',
                   border: '1px dashed color-mix(in oklab, var(--text-faint) 44%, transparent)',
                   boxShadow: 'inset 0 1px 12px color-mix(in oklab, var(--accent) 6%, transparent)',
                 }} />
                 <div style={{
-                  position: 'absolute', left: '38%', right: '38%', top: '62%', height: '12%',
+                  position: 'absolute', left: '41%', right: '41%', top: '61%', height: '10%',
                   borderRadius: '50%',
                   background: 'linear-gradient(180deg, color-mix(in oklab, var(--surface-3) 78%, #fff 7%), color-mix(in oklab, var(--surface-3) 76%, #000 10%))',
                   opacity: .48,
@@ -137,10 +137,10 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
                 }} />
                 {agents.map((agent, index) => {
                   const positions = [
-                    { left: '42%', top: '4%' },
-                    { left: '72%', top: '32%' },
-                    { left: '43%', top: '66%' },
-                    { left: '12%', top: '33%' },
+                    { left: '43%', top: '8%', zIndex: 4 },
+                    { left: '78%', top: '31%', zIndex: 8 },
+                    { left: '44%', top: '69%', zIndex: 12 },
+                    { left: '9%', top: '32%', zIndex: 8 },
                   ];
                   return (
                     <div key={agent.name} className="auth-agent" style={{
