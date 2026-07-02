@@ -24,6 +24,10 @@ afterEach(async () => {
   delete process.env.ROUNDTABLE_OPENAI_API_KEY;
   delete process.env.ROUNDTABLE_OPENAI_BASE_URL;
   delete process.env.ROUNDTABLE_OPENAI_MODEL;
+  delete process.env.MINIMAX_API_KEY;
+  delete process.env.MINIMAX_BASE_URL;
+  delete process.env.MINIMAX_MODEL;
+  delete process.env.ROUNDTABLE_AGENT_ADAPTER;
   vi.unstubAllGlobals();
   await rm(tempDir, { recursive: true, force: true });
 });
@@ -49,6 +53,42 @@ describe('settings actions', () => {
     expect(JSON.stringify(state)).not.toContain('sk-test-secret');
     expect(exposed?.apiKeySet).toBe(true);
     expect(exposed?.apiKeySource).toBe('settings');
+  });
+
+  it('uses the configured model API as the default workflow adapter when no override is set', async () => {
+    const state = await saveSettings({
+      providers: [{
+        provider: 'openai-compatible',
+        enabled: true,
+        baseUrl: 'https://api.deepseek.com/v1',
+        model: 'deepseek-chat',
+        apiKey: 'deepseek-secret',
+      }],
+    });
+
+    expect(state.defaultAgentAdapter).toBeNull();
+    expect(state.effectiveAgentAdapter).toBe('openai-compat');
+    expect(state.effectiveAgentAdapterSource).toBe('model-provider');
+    expect(state.effectiveModelProvider).toBe('openai-compatible');
+    expect(await resolveDefaultAgentAdapter()).toBe('openai-compat');
+  });
+
+  it('keeps explicit and env adapter overrides ahead of configured model APIs', async () => {
+    await saveSettings({
+      providers: [{
+        provider: 'minimax',
+        enabled: true,
+        baseUrl: 'https://api.minimaxi.com/v1',
+        model: 'MiniMax-M3',
+        apiKey: 'mini-secret',
+      }],
+    });
+
+    process.env.ROUNDTABLE_AGENT_ADAPTER = 'local-dispatch';
+    expect(await resolveDefaultAgentAdapter()).toBe('local-dispatch');
+
+    await saveSettings({ defaultAgentAdapter: 'agent-cli' });
+    expect(await resolveDefaultAgentAdapter()).toBe('agent-cli');
   });
 
   it('keeps existing keys when saving a provider with an empty key field', async () => {

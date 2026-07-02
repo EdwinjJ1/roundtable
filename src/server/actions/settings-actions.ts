@@ -1,4 +1,4 @@
-import { mutateData, nowIso, readData } from '../store.js';
+import { mutateData, nowIso, readData, type RoundtableData } from '../store.js';
 import type { ModelProviderConfig, ModelProviderKind } from '../types.js';
 
 export type ModelProviderDefinition = {
@@ -24,8 +24,17 @@ export type ResolvedModelProvider = {
   source: 'settings' | 'env' | 'none';
 };
 
+export type AgentAdapterResolution = {
+  value: string;
+  source: 'settings' | 'env' | 'model-provider' | 'built-in';
+  modelProvider: ModelProviderKind | null;
+};
+
 export type SettingsState = {
   defaultAgentAdapter: string | null;
+  effectiveAgentAdapter: string;
+  effectiveAgentAdapterSource: AgentAdapterResolution['source'];
+  effectiveModelProvider: ModelProviderKind | null;
   adapters: Array<{ value: string; label: string; description: string }>;
   providers: Array<{
     provider: ModelProviderKind;
@@ -104,11 +113,15 @@ const ADAPTER_OPTIONS = [
 
 export async function listSettingsState(): Promise<SettingsState> {
   const data = await readData();
+  const effective = await resolveDefaultAgentAdapterState(data);
   return {
     defaultAgentAdapter: clean(data.settings.defaultAgentAdapter) ?? null,
+    effectiveAgentAdapter: effective.value,
+    effectiveAgentAdapterSource: effective.source,
+    effectiveModelProvider: effective.modelProvider,
     adapters: ADAPTER_OPTIONS,
     providers: await Promise.all(MODEL_PROVIDER_DEFINITIONS.map(async (definition) => {
-      const resolved = await resolveModelProvider(definition.provider);
+      const resolved = resolveModelProviderFromData(definition.provider, data);
       return {
         provider: definition.provider,
         label: resolved.label,
@@ -164,8 +177,29 @@ export async function saveSettings(input: {
 }
 
 export async function resolveDefaultAgentAdapter(): Promise<string | null> {
-  const data = await readData();
-  return clean(data.settings.defaultAgentAdapter) ?? null;
+  return (await resolveDefaultAgentAdapterState()).value;
+}
+
+export async function resolveDefaultAgentAdapterState(
+  inputData?: RoundtableData,
+): Promise<AgentAdapterResolution> {
+  const data = inputData ?? await readData();
+  const fromSettings = normalizeAgentAdapter(data.settings.defaultAgentAdapter);
+  if (fromSettings) return { value: fromSettings, source: 'settings', modelProvider: null };
+
+  const fromEnv = normalizeAgentAdapter(process.env.ROUNDTABLE_AGENT_ADAPTER);
+  if (fromEnv) return { value: fromEnv, source: 'env', modelProvider: null };
+
+  const provider = firstConfiguredModelProvider(data);
+  if (provider) {
+    return {
+      value: adapterForModelProvider(provider),
+      source: 'model-provider',
+      modelProvider: provider,
+    };
+  }
+
+  return { value: 'local-dispatch', source: 'built-in', modelProvider: null };
 }
 
 export async function isModelProviderConfigured(provider: ModelProviderKind): Promise<boolean> {
@@ -173,9 +207,21 @@ export async function isModelProviderConfigured(provider: ModelProviderKind): Pr
 }
 
 export async function resolveModelProvider(provider: ModelProviderKind): Promise<ResolvedModelProvider> {
+  return resolveModelProviderFromData(provider, await readData());
+}
+
+export class SettingsActionError extends Error {
+  constructor(readonly code: string, readonly status = 400) {
+    super(code);
+  }
+}
+
+function resolveModelProviderFromData(
+  provider: ModelProviderKind,
+  data: RoundtableData,
+): ResolvedModelProvider {
   const definition = providerDefinition(provider);
   if (!definition) throw new SettingsActionError('unsupported_model_provider', 400);
-  const data = await readData();
   const stored = data.settings.modelProviders.find((item) => item.provider === provider) ?? null;
   const envApiKey = clean(process.env[definition.apiKeyEnv]) ?? null;
   const envBaseUrl = clean(process.env[definition.baseUrlEnv]) ?? null;
@@ -212,12 +258,6 @@ export async function resolveModelProvider(provider: ModelProviderKind): Promise
   };
 }
 
-export class SettingsActionError extends Error {
-  constructor(readonly code: string, readonly status = 400) {
-    super(code);
-  }
-}
-
 function normalizeProviderPatch(
   definition: ModelProviderDefinition,
   current: ModelProviderConfig | null,
@@ -248,6 +288,28 @@ function normalizeProviderPatch(
 
 function providerDefinition(provider: string): ModelProviderDefinition | null {
   return MODEL_PROVIDER_DEFINITIONS.find((definition) => definition.provider === provider) ?? null;
+}
+
+function firstConfiguredModelProvider(data: RoundtableData): ModelProviderKind | null {
+  for (const provider of ['openai-compatible', 'minimax'] satisfies ModelProviderKind[]) {
+    if (resolveModelProviderFromData(provider, data).configured) return provider;
+  }
+  return null;
+}
+
+function adapterForModelProvider(provider: ModelProviderKind): string {
+  return provider === 'minimax' ? 'minimax' : 'openai-compat';
+}
+
+function normalizeAgentAdapter(value: string | null | undefined): string | null {
+  const raw = clean(value)?.toLowerCase();
+  if (!raw) return null;
+  if (raw === 'minimax') return 'minimax';
+  if (raw === 'openai-compat' || raw === 'openai-compatible' || raw === 'openai' || raw === 'deepseek') return 'openai-compat';
+  if (raw === 'agent-cli' || raw === 'external-cli' || raw === 'cli-runtime' || raw === 'runtime' || raw === 'cli') return 'agent-cli';
+  if (raw === 'e2b') return 'e2b';
+  if (raw === 'local' || raw === 'local-dispatch') return 'local-dispatch';
+  return null;
 }
 
 function clean(value: string | null | undefined): string | undefined {

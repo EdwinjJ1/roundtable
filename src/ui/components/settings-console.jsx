@@ -73,6 +73,8 @@ function SettingsConsole() {
 
   const providers = draft?.providers || [];
   const adapterOptions = state?.adapters || [];
+  const activeAdapter = adapterOptions.find((option) => option.value === state?.effectiveAgentAdapter);
+  const selectedAdapter = adapterOptions.find((option) => option.value === draft?.defaultAgentAdapter);
   const dirty = useMemo(() => Boolean(draft && state), [draft, state]);
 
   const save = async () => {
@@ -152,15 +154,18 @@ function SettingsConsole() {
                   ...current,
                   defaultAgentAdapter: e.target.value,
                 }))} style={field}>
-                  <option value="">Server default</option>
+                  <option value="">Auto: configured model API</option>
                   {adapterOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
+                <div className="mono" style={{ marginTop: 6, fontSize: 10.5, color: 'var(--text-faint)' }}>
+                  active: {activeAdapter?.label || state?.effectiveAgentAdapter || 'Local Dispatch'} · {sourceLabel(state?.effectiveAgentAdapterSource)}
+                </div>
               </div>
               <div style={{ fontSize: 12.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                {adapterOptions.find((option) => option.value === draft?.defaultAgentAdapter)?.description
-                  || 'Use the server environment default when no setting is saved.'}
+                {selectedAdapter?.description
+                  || 'Use the first configured model API by default. Agent CLI settings stay available for explicit per-agent overrides.'}
               </div>
             </div>
           </div>
@@ -271,6 +276,15 @@ function toDraft(state) {
       clearApiKey: false,
     })),
   };
+}
+
+function sourceLabel(source) {
+  return {
+    settings: 'settings',
+    env: 'env',
+    'model-provider': 'model API',
+    'built-in': 'built in',
+  }[source] || 'auto';
 }
 
 const labelStyle = {

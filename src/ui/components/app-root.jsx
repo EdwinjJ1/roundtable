@@ -156,10 +156,10 @@ function storedTurnToLiveTurn(turn) {
 }
 
 
-// Don't force an adapter from the client — let the server pick from its
-// ROUNDTABLE_AGENT_ADAPTER env (openai-compat / minimax / e2b / local-dispatch).
-// Forcing 'local-dispatch' here was overriding the real-model adapter and
-// producing template stubs.
+// Don't force an adapter from the client. The server resolves settings/env first,
+// then configured model APIs, and only falls back to local-dispatch.
+// Forcing 'local-dispatch' here was overriding real-model adapters and producing
+// template stubs.
 function preferredAgentAdapterRequest() {
   return {};
 }
