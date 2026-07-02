@@ -214,6 +214,11 @@ export type PlanTask = {
   priority?: number | undefined;
   producedFor?: string | undefined;
   fixRound?: number | undefined;
+  // Set on fixer tasks that repair a concrete deliverable (e.g. an HTML page):
+  // the workspace path the corrected output should be written to, and the task
+  // whose artifact gets updated in place so the preview shows the fixed version.
+  repairTargetPath?: string | undefined;
+  repairTargetTaskId?: string | undefined;
 };
 
 export type Plan = {

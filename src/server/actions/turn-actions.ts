@@ -423,10 +423,18 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   const eventsByTask = new Map<string, AgentEvent[]>();
   const artifactByTask = new Map<string, Artifact>();
 
+  // Title/brief patches computed when the planner completes. The scheduler
+  // snapshots the task graph BEFORE the planner runs, so without this the model
+  // prompts and artifact filenames would keep the "awaiting plan" placeholders
+  // (retitleDownstreamTasks only fixes the persisted copy the UI reads).
+  const patchByTask = new Map<string, { title: string; brief: string }>();
+
   const runTask = async (
     task: PlanTask,
     depOutputs: Record<string, { summary: string; artifactId?: string | undefined }>,
   ): Promise<TaskResult> => {
+    const patch = patchByTask.get(task.id);
+    const effectiveTask = patch ? { ...task, ...patch } : task;
     const depEntries = Object.entries(depOutputs);
     const contextArtifacts = [
       ...turn.artifacts,
@@ -446,7 +454,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
         workflowTemplateId: turn.workflowTemplateId,
       }),
       turn,
-      task,
+      task: effectiveTask,
       artifacts: contextArtifacts,
     });
     const handoffContext = formatHandoffContext(handoffCard, depOutputs);
@@ -454,7 +462,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     let result;
     let fallbackNote: AgentEvent | null = null;
     try {
-      result = await runAgentTask({ adapter, workspace, task, message: turn.message, handoffContext });
+      result = await runAgentTask({ adapter, workspace, task: effectiveTask, message: turn.message, handoffContext });
     } catch (error) {
       // Opt-in adapter unavailable (E2B / MiniMax / OpenAI-compatible): fall back
       // to local-dispatch in this layer (not silently inside the adapter). The
@@ -469,14 +477,14 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
           type: 'thinking_delta',
           delta: `${error.name} (${error.message}); fell back to local-dispatch.`,
         };
-        result = await runAgentTask({ adapter: 'local-dispatch', workspace, task, message: turn.message, handoffContext });
+        result = await runAgentTask({ adapter: 'local-dispatch', workspace, task: effectiveTask, message: turn.message, handoffContext });
       } else {
         throw error;
       }
     }
 
     eventsByTask.set(task.id, fallbackNote ? [fallbackNote, ...result.events] : result.events);
-    artifactByTask.set(task.id, artifactFromRun(turn, task, result));
+    artifactByTask.set(task.id, artifactFromRun(turn, effectiveTask, result));
 
     if (!result.ok) {
       return { ok: false, error: { message: result.error ?? 'agent_task_failed' } };
@@ -493,9 +501,22 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
 
     // The plan is now defined: once the planner finishes, the downstream tasks
     // are no longer "awaiting plan" — give them concrete titles so the UI stops
-    // showing three placeholder rows that all looked the same.
+    // showing three placeholder rows that all looked the same. Mirror the same
+    // patches onto the in-memory graph the scheduler keeps feeding us.
     if (task.role === 'planner') {
+      for (const [taskId, taskPatch] of plannedTaskPatches(turn.plan.tasks, task.id, turn.message)) {
+        patchByTask.set(taskId, taskPatch);
+      }
       await retitleDownstreamTasks(turn.id, task.id, turn.message);
+    }
+
+    // A fixer that produced a complete deliverable repairs the artifact it was
+    // derived for: update it in place (bumped version) so the preview shows the
+    // FIXED page, not the flawed original the reviewer rejected.
+    if (task.repairTargetTaskId) {
+      const target = artifactByTask.get(task.repairTargetTaskId);
+      const repaired = target ? repairedTargetArtifact(target, result.text) : null;
+      if (repaired) artifactByTask.set(task.repairTargetTaskId, repaired);
     }
 
     // Review gate: a reviewer that reports blocking (Critical/High) issues should
@@ -570,10 +591,25 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     now: nowIso,
     onFailure: (failed, error) => {
       const fixer = makeFixerTask(failed, error);
+      // Point the fixer at the concrete deliverable it repairs (the previewable
+      // artifact among the failed task and its upstream deps — for a failed
+      // review that's the implementer's page). The fixer then writes its
+      // corrected output to the SAME path and the artifact is updated in place,
+      // so the fix actually lands in what the user previews.
+      const repairTarget = [failed.id, ...failed.deps]
+        .map((taskId) => ({ taskId, artifact: artifactByTask.get(taskId) }))
+        .find((entry) => entry.artifact?.kind === 'preview');
+      const enriched: PlanTask = repairTarget?.artifact
+        ? {
+            ...fixer,
+            repairTargetPath: repairTarget.artifact.title,
+            repairTargetTaskId: repairTarget.taskId,
+          }
+        : fixer;
       // Remember it so onTaskState can add it to the persisted plan when it runs
       // (a concurrent write here would race the store's read-modify-write).
-      derivedById.set(fixer.id, fixer);
-      return fixer;
+      derivedById.set(enriched.id, enriched);
+      return enriched;
     },
     onTaskState,
   });
@@ -649,6 +685,8 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
       parallel: task.parallel,
       ...(task.producedFor !== undefined ? { producedFor: task.producedFor } : {}),
       ...(task.fixRound !== undefined ? { fixRound: task.fixRound } : {}),
+      ...(task.repairTargetPath !== undefined ? { repairTargetPath: task.repairTargetPath } : {}),
+      ...(task.repairTargetTaskId !== undefined ? { repairTargetTaskId: task.repairTargetTaskId } : {}),
     }));
   const completed = await updateTurn(turn.id, (current) => {
     const nextTurn = {
@@ -1033,38 +1071,60 @@ function plannedTitleForRole(role: string | undefined, displayName: string, goal
   return `Plan ${goal}`;
 }
 
+// Concrete title+brief for every task that (transitively) depends on the
+// planner, computed once the plan exists. Pure so the dispatch loop can apply
+// the same patches to its in-memory scheduler tasks (the scheduler snapshots
+// the graph before the planner runs, so persisting alone is not enough — the
+// model prompts and artifact paths read the in-memory objects).
+export function plannedTaskPatches(
+  tasks: PlanTask[],
+  plannerTaskId: string,
+  message: string,
+): Map<string, { title: string; brief: string }> {
+  const goal = compactTitle(messageWithoutMentions(message) || message);
+  // Build the set of tasks reachable from the planner via deps.
+  const downstream = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const task of tasks) {
+      if (downstream.has(task.id)) continue;
+      if (task.deps.includes(plannerTaskId) || task.deps.some((dep) => downstream.has(dep))) {
+        downstream.add(task.id);
+        changed = true;
+      }
+    }
+  }
+  const ownerName = (task: PlanTask): string =>
+    AGENT_ROSTER.find((agent) => agent.id === task.owner)?.displayName ?? task.owner ?? task.role ?? 'agent';
+  const patches = new Map<string, { title: string; brief: string }>();
+  for (const task of tasks) {
+    if (!downstream.has(task.id)) continue;
+    const title = plannedTitleForRole(task.role, ownerName(task), goal);
+    patches.set(task.id, {
+      title,
+      // Mirror taskForAgent()'s brief shape so the handoff card reads the same.
+      brief: `${title}. Agent: ${ownerName(task)}. Role: ${task.role ?? 'agent'}. User request: ${message}`,
+    });
+  }
+  return patches;
+}
+
 // Once the planner task completes, rewrite every task that (transitively)
 // depends on it from its placeholder title to a concrete one. The plan now
 // exists, so the downstream tasks have a real, named scope.
 async function retitleDownstreamTasks(turnId: string, plannerTaskId: string, message: string): Promise<void> {
-  const goal = compactTitle(messageWithoutMentions(message) || message);
   await updateTurn(turnId, (current) => {
-    const tasks = current.plan.tasks;
-    // Build the set of tasks reachable from the planner via deps.
-    const downstream = new Set<string>();
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const task of tasks) {
-        if (downstream.has(task.id)) continue;
-        if (task.deps.includes(plannerTaskId) || task.deps.some((dep) => downstream.has(dep))) {
-          downstream.add(task.id);
-          changed = true;
-        }
-      }
-    }
-    if (downstream.size === 0) return current;
-    const ownerName = (task: PlanTask): string =>
-      AGENT_ROSTER.find((agent) => agent.id === task.owner)?.displayName ?? task.owner ?? task.role ?? 'agent';
+    const patches = plannedTaskPatches(current.plan.tasks, plannerTaskId, message);
+    if (patches.size === 0) return current;
     return {
       ...current,
       plan: {
         ...current.plan,
-        tasks: tasks.map((task) =>
-          downstream.has(task.id)
-            ? { ...task, title: plannedTitleForRole(task.role, ownerName(task), goal) }
-            : task,
-        ),
+        tasks: current.plan.tasks.map((task) => {
+          const patch = patches.get(task.id);
+          return patch ? { ...task, ...patch } : task;
+        }),
       },
     };
   });
@@ -1359,7 +1419,7 @@ function countMatches(text: string, re: RegExp): number {
 
 // Derive a fixer task when a task fails (agent error or blocking safety finding).
 // The scheduler wires deps + lineage; we only define what the fixer should do.
-function makeFixerTask(
+export function makeFixerTask(
   failed: ScheduledTask,
   error: { message: string; scan?: SafetyFinding[] | undefined; review?: string | undefined },
 ): PlanTask {
@@ -1370,6 +1430,13 @@ function makeFixerTask(
     ? `\n\nSafety findings:\n${describeFindings(error.scan)}`
     : '';
   const reviewText = error.review ? `\n\nReview report to address:\n\n${error.review}` : '';
+  // Inherit the failed task's deps so the fixer receives the same upstream
+  // outputs (e.g. the reviewed HTML) — a fixer that can't see the deliverable it
+  // is repairing can only regenerate blind. A task that ran has all its ordinary
+  // deps completed; the one exception is its own repair edge (producedFor, only
+  // set on fixer tasks), which points at a FAILED task and would block a chained
+  // fixer forever if inherited as an ordinary dep.
+  const inheritedDeps = failed.deps.filter((dep) => dep !== failed.producedFor);
   return {
     id: `fix_${failed.id}_r${round}`,
     // A review-driven fix reads better as "Apply review fixes" than "Fix Review …".
@@ -1386,8 +1453,24 @@ function makeFixerTask(
       : `Repair the failure from "${failed.title}" (${failed.id}). `
         + `Error: ${error.message}.${findingsText}${reviewText}\n\n`
         + `Apply a focused fix and summarize the changed files.`,
-    deps: [failed.id],
+    deps: [failed.id, ...inheritedDeps],
     parallel: false,
+  };
+}
+
+// If the fixer's output is a complete deliverable (a full HTML document), fold
+// it back into the artifact it repaired: same id, bumped version, new content.
+// The UI previews the FIRST artifact with kind 'preview', so updating in place
+// is what makes the fix actually visible. Returns null when the output is prose
+// (a summary, not a deliverable) — in that case the original artifact stands.
+export function repairedTargetArtifact(original: Artifact, fixedText: string): Artifact | null {
+  if (!/^\s*(<!doctype html|<html)/i.test(fixedText)) return null;
+  return {
+    ...original,
+    preview: fixedText,
+    code: original.code !== null ? fixedText : null,
+    version: original.version + 1,
+    createdAt: nowIso(),
   };
 }
 

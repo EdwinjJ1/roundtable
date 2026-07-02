@@ -342,6 +342,10 @@ async function runOpenAICompatTask(input: {
 }
 
 function pathForTask(task: PlanTask): string {
+  // A fixer repairing a concrete deliverable writes the corrected output to the
+  // SAME path as the original, so the fix replaces the flawed page instead of
+  // landing in a markdown file nobody previews.
+  if (task.repairTargetPath) return task.repairTargetPath;
   const slug = task.title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -598,7 +602,9 @@ function chatAgentPrompt(
       ? 'Output a COMPLETE, self-contained HTML document (with inline CSS/JS) that fulfills the task. Output only the HTML, no prose, no code fences.'
       : 'Output the complete deliverable content directly (code or Markdown). Do not describe what you would do — produce it.',
     reviewer: 'Review the upstream deliverable. Output a Markdown report: concrete issues, risks, and missing pieces, each with severity. If it is solid, say so explicitly.',
-    fixer: 'Apply a focused fix for the reported problem and output the corrected deliverable plus a short summary of what changed.',
+    fixer: isHtml
+      ? 'Fix every reported issue in the upstream HTML deliverable and output the COMPLETE corrected HTML document (inline CSS/JS). Preserve everything that was not flagged. Output only the HTML, no prose, no code fences.'
+      : 'Apply a focused fix for the reported problem and output the corrected deliverable plus a short summary of what changed.',
   }[agent.role] ?? 'Produce your deliverable directly in the response.';
 
   return [
