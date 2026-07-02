@@ -102,15 +102,38 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
             <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}>
               <div style={{ position: 'relative', width: 'min(520px, 88vw)', aspectRatio: '1.2 / 1' }}>
                 <div style={{
-                  position: 'absolute', left: '14%', right: '14%', top: '28%', height: '34%',
-                  borderRadius: '50%', background: `radial-gradient(circle at ${50 + pointer.x * 12}% ${42 + pointer.y * 12}%, color-mix(in oklab, var(--accent) ${pointer.active ? 14 : 7}%, var(--surface)), var(--surface) 58%)`,
-                  border: '1px solid var(--border)',
-                  boxShadow: `inset ${pointer.x * -8}px ${pointer.y * -5}px 34px -30px rgba(40,40,70,.38), 0 24px 70px -42px rgba(40,40,70,.55)`,
+                  position: 'absolute', left: '12%', right: '12%', top: '55%', height: '17%',
+                  borderRadius: '50%', background: 'rgba(40,40,70,.20)',
+                  filter: 'blur(26px)', opacity: .55,
+                  transform: `translate(${pointer.x * 5}px, ${pointer.y * 4}px)`,
+                  transition: 'transform .18s ease-out',
+                }} />
+                <div style={{
+                  position: 'absolute', left: '13%', right: '13%', top: '38%', height: '29%',
+                  borderRadius: '50%',
+                  background: 'linear-gradient(180deg, color-mix(in oklab, var(--surface-3) 74%, #fff 10%), color-mix(in oklab, var(--surface-3) 82%, #000 7%))',
+                  boxShadow: 'inset 0 -18px 26px -23px rgba(40,40,70,.52)',
+                }} />
+                <div style={{
+                  position: 'absolute', left: '12%', right: '12%', top: '31%', height: '31%',
+                  borderRadius: '50%',
+                  background: `radial-gradient(circle at ${48 + pointer.x * 13}% ${35 + pointer.y * 10}%, color-mix(in oklab, var(--accent) ${pointer.active ? 13 : 7}%, #fff), color-mix(in oklab, var(--surface) 96%, #fff 4%) 44%, var(--surface-2) 100%)`,
+                  border: '1px solid color-mix(in oklab, var(--border-strong) 72%, transparent)',
+                  boxShadow: `inset ${pointer.x * -10}px ${pointer.y * -6}px 24px -24px rgba(40,40,70,.55), inset 0 -16px 28px -26px rgba(40,40,70,.58), 0 18px 48px -36px rgba(40,40,70,.52)`,
                   transition: 'background .18s ease, box-shadow .18s ease',
                 }} />
                 <div style={{
-                  position: 'absolute', left: '28%', right: '28%', top: '39%', height: '13%',
-                  borderRadius: '50%', border: '1px dashed color-mix(in oklab, var(--text-faint) 50%, transparent)',
+                  position: 'absolute', left: '20%', right: '20%', top: '39%', height: '14%',
+                  borderRadius: '50%',
+                  border: '1px dashed color-mix(in oklab, var(--text-faint) 44%, transparent)',
+                  boxShadow: 'inset 0 1px 12px color-mix(in oklab, var(--accent) 6%, transparent)',
+                }} />
+                <div style={{
+                  position: 'absolute', left: '38%', right: '38%', top: '62%', height: '12%',
+                  borderRadius: '50%',
+                  background: 'linear-gradient(180deg, color-mix(in oklab, var(--surface-3) 78%, #fff 7%), color-mix(in oklab, var(--surface-3) 76%, #000 10%))',
+                  opacity: .48,
+                  filter: 'blur(.2px)',
                 }} />
                 {agents.map((agent, index) => {
                   const positions = [
@@ -143,9 +166,10 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
                 <div style={{
                   position: 'absolute', left: '50%', top: '43%',
                   transform: `translate(calc(-50% + ${pointer.x * 4}px), calc(-50% + ${pointer.y * 3}px))`,
-                  padding: '8px 12px', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)',
+                  padding: '7px 12px', borderRadius: 'var(--r-sm)',
+                  background: 'color-mix(in oklab, var(--surface) 72%, var(--surface-2))',
                   border: '1px solid var(--border)', color: 'var(--text-muted)', fontSize: 12.5,
-                  boxShadow: 'var(--shadow-card)',
+                  boxShadow: '0 1px 0 rgba(255,255,255,.65) inset, var(--shadow-card)',
                   transition: 'transform .16s ease-out',
                 }}>
                   Product Squad
