@@ -1,11 +1,12 @@
 import { AuthPage } from '@/ui/components/auth-page';
 
 type SignUpPageProps = {
-  searchParams?: {
+  searchParams?: Promise<{
     callbackUrl?: string;
-  };
+  }>;
 };
 
-export default function SignUpPage({ searchParams }: SignUpPageProps) {
-  return <AuthPage mode="signup" callbackUrl={searchParams?.callbackUrl} />;
+export default async function SignUpPage({ searchParams }: SignUpPageProps) {
+  const params = await searchParams;
+  return <AuthPage mode="signup" callbackUrl={params?.callbackUrl} />;
 }

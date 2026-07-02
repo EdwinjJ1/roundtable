@@ -1,11 +1,12 @@
 import { AuthPage } from '@/ui/components/auth-page';
 
 type SignInPageProps = {
-  searchParams?: {
+  searchParams?: Promise<{
     callbackUrl?: string;
-  };
+  }>;
 };
 
-export default function SignInPage({ searchParams }: SignInPageProps) {
-  return <AuthPage mode="signin" callbackUrl={searchParams?.callbackUrl} />;
+export default async function SignInPage({ searchParams }: SignInPageProps) {
+  const params = await searchParams;
+  return <AuthPage mode="signin" callbackUrl={params?.callbackUrl} />;
 }
