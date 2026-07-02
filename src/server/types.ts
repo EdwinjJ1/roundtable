@@ -171,6 +171,7 @@ export type UserSkill = {
   description: string;
   source: UserSkillSource;
   scope: UserSkillScope;
+  targetChatId: string | null;
   enabled: boolean;
   evidence: string | null;
   createdAt: string;

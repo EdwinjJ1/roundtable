@@ -101,16 +101,26 @@ const userSkillsRouter = createTRPCRouter({
       description: z.string().optional(),
       source: z.enum(['user', 'observed', 'workspace', 'recommended']).optional(),
       scope: z.enum(['personal', 'workspace', 'mission']).optional(),
+      targetChatId: z.string().nullable().optional(),
       evidence: z.string().nullable().optional(),
       enabled: z.boolean().optional(),
     }))
     .mutation(({ ctx, input }) => upsertUserSkill(ctx.user, input)),
   setEnabled: protectedProcedure
-    .input(z.object({ key: z.string().min(1), enabled: z.boolean() }))
+    .input(z.object({
+      key: z.string().min(1),
+      enabled: z.boolean(),
+      scope: z.enum(['personal', 'workspace', 'mission']).optional(),
+      targetChatId: z.string().nullable().optional(),
+    }))
     .mutation(({ ctx, input }) => setUserSkillEnabled(ctx.user, input)),
   delete: protectedProcedure
-    .input(z.object({ key: z.string().min(1) }))
-    .mutation(({ ctx, input }) => deleteUserSkill(ctx.user, input.key)),
+    .input(z.object({
+      key: z.string().min(1),
+      scope: z.enum(['personal', 'workspace', 'mission']).optional(),
+      targetChatId: z.string().nullable().optional(),
+    }))
+    .mutation(({ ctx, input }) => deleteUserSkill(ctx.user, input)),
 });
 
 const missionsRouter = createTRPCRouter({

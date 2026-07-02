@@ -13,6 +13,7 @@ export type SkillInput = {
   description?: string | undefined;
   source?: UserSkillSource | undefined;
   scope?: UserSkillScope | undefined;
+  targetChatId?: string | null | undefined;
   evidence?: string | null | undefined;
   enabled?: boolean | undefined;
 };
@@ -122,10 +123,16 @@ export async function listSuggestedSkills(actor: Actor): Promise<SuggestedSkill[
 export async function upsertUserSkill(actor: Actor, input: SkillInput): Promise<UserSkill> {
   const keyValue = normalizeKey(input.key);
   if (!keyValue) throw new Error('missing_skill_key');
+  const scope = input.scope ?? 'personal';
+  const targetChatId = scope === 'mission' ? input.targetChatId?.trim() || null : null;
   return mutateData((data) => {
     materializeProfileSkills(data, actor.id);
     const now = nowIso();
-    let skill = data.userSkills.find((item) => item.userId === actor.id && item.key === keyValue);
+    let skill = data.userSkills.find((item) =>
+      item.userId === actor.id
+      && item.key === keyValue
+      && item.scope === scope
+      && (item.targetChatId ?? null) === targetChatId);
     const catalog = catalogEntry(keyValue);
     if (!skill) {
       skill = {
@@ -135,7 +142,8 @@ export async function upsertUserSkill(actor: Actor, input: SkillInput): Promise<
         label: input.label?.trim() || catalog.label,
         description: input.description?.trim() || catalog.description,
         source: input.source ?? 'user',
-        scope: input.scope ?? 'personal',
+        scope,
+        targetChatId,
         enabled: input.enabled ?? true,
         evidence: input.evidence ?? null,
         createdAt: now,
@@ -146,7 +154,8 @@ export async function upsertUserSkill(actor: Actor, input: SkillInput): Promise<
       skill.label = input.label?.trim() || skill.label || catalog.label;
       skill.description = input.description?.trim() || skill.description || catalog.description;
       skill.source = input.source ?? skill.source;
-      skill.scope = input.scope ?? skill.scope;
+      skill.scope = scope;
+      skill.targetChatId = targetChatId;
       skill.enabled = input.enabled ?? skill.enabled;
       skill.evidence = input.evidence ?? skill.evidence;
       skill.updatedAt = now;
@@ -156,11 +165,17 @@ export async function upsertUserSkill(actor: Actor, input: SkillInput): Promise<
   });
 }
 
-export async function setUserSkillEnabled(actor: Actor, input: { key: string; enabled: boolean }): Promise<UserSkill> {
+export async function setUserSkillEnabled(actor: Actor, input: { key: string; enabled: boolean; scope?: UserSkillScope | undefined; targetChatId?: string | null | undefined }): Promise<UserSkill> {
   const keyValue = normalizeKey(input.key);
+  const scope = input.scope ?? 'personal';
+  const targetChatId = scope === 'mission' ? input.targetChatId?.trim() || null : null;
   return mutateData((data) => {
     materializeProfileSkills(data, actor.id);
-    const skill = data.userSkills.find((item) => item.userId === actor.id && item.key === keyValue);
+    const skill = data.userSkills.find((item) =>
+      item.userId === actor.id
+      && item.key === keyValue
+      && item.scope === scope
+      && (item.targetChatId ?? null) === targetChatId);
     if (!skill) throw new Error('skill_not_found');
     skill.enabled = input.enabled;
     skill.updatedAt = nowIso();
@@ -169,10 +184,18 @@ export async function setUserSkillEnabled(actor: Actor, input: { key: string; en
   });
 }
 
-export async function deleteUserSkill(actor: Actor, key: string): Promise<{ key: string }> {
+export async function deleteUserSkill(actor: Actor, input: { key: string; scope?: UserSkillScope | undefined; targetChatId?: string | null | undefined }): Promise<{ key: string }> {
+  const key = input.key;
   const keyValue = normalizeKey(key);
+  const scope = input.scope ?? 'personal';
+  const targetChatId = scope === 'mission' ? input.targetChatId?.trim() || null : null;
   return mutateData((data) => {
-    data.userSkills = data.userSkills.filter((skill) => !(skill.userId === actor.id && skill.key === keyValue));
+    data.userSkills = data.userSkills.filter((skill) => !(
+      skill.userId === actor.id
+      && skill.key === keyValue
+      && skill.scope === scope
+      && (skill.targetChatId ?? null) === targetChatId
+    ));
     syncProfileDefaultSkills(data, actor.id);
     return { key: keyValue };
   });
@@ -185,7 +208,10 @@ export async function getWorkingStyleSnapshot(
   if (!actor) return emptyWorkingStyle();
   const data = await readData();
   const skills = data.userSkills
-    .filter((skill) => skill.userId === actor.id && skill.enabled)
+    .filter((skill) =>
+      skill.userId === actor.id
+      && skill.enabled
+      && (skill.scope !== 'mission' || (skill.targetChatId ?? null) === (chatId ?? null)))
     .map((skill) => ({
       key: skill.key,
       label: skill.label,
@@ -234,6 +260,7 @@ function materializeProfileSkills(data: { profiles: Array<{ userId: string; defa
       description: catalog.description,
       source: 'user',
       scope: 'personal',
+      targetChatId: null,
       enabled: true,
       evidence: null,
       createdAt: now,

@@ -247,7 +247,7 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
             : created.map((a) => <FileRow key={a.id} art={a} agents={agents} onOpen={onOpenArtifact} activeChatId={activeChatId} />)}
         </div>
       ) : tab === 'skills' ? (
-        <SkillsPanel authed={authed} context={skillContext} />
+        <SkillsPanel authed={authed} activeChatId={activeChatId} context={skillContext} />
       ) : live || hasLocalTurns ? (
         <LiveNotes agents={agents} artifacts={created} handoffs={liveHandoffs} />
       ) : (
@@ -257,7 +257,7 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
   );
 }
 
-function SkillsPanel({ authed, context }) {
+function SkillsPanel({ authed, activeChatId, context }) {
   const utils = trpc.useUtils();
   const skillsQ = trpc.userSkills.list.useQuery(undefined, { enabled: !!authed });
   const suggestionsQ = trpc.userSkills.suggestions.useQuery(undefined, { enabled: !!authed });
@@ -292,9 +292,10 @@ function SkillsPanel({ authed, context }) {
   }
 
   const active = skillsQ.data || [];
-  const activeKeys = new Set(active.map((skill) => skill.key));
-  const suggested = (suggestionsQ.data || []).filter((skill) => !activeKeys.has(skill.key));
-  const recommended = (recommendedQ.data || []).filter((skill) => !activeKeys.has(skill.key));
+  const enabledKeys = new Set(active.filter((skill) => skill.enabled).map((skill) => skill.key));
+  const existingPersonalKeys = new Set(active.filter((skill) => skill.scope !== 'mission').map((skill) => skill.key));
+  const suggested = (suggestionsQ.data || []).filter((skill) => !existingPersonalKeys.has(skill.key));
+  const recommended = (recommendedQ.data || []).filter((skill) => !enabledKeys.has(skill.key));
   const busy = upsertSkill.isPending || setEnabled.isPending || deleteSkill.isPending;
   const accept = (skill, scope = skill.scope || 'personal') => {
     upsertSkill.mutate({
@@ -303,6 +304,7 @@ function SkillsPanel({ authed, context }) {
       description: skill.description,
       source: skill.source,
       scope,
+      targetChatId: scope === 'mission' ? activeChatId : null,
       evidence: skill.evidence,
       enabled: true,
     });
@@ -319,11 +321,20 @@ function SkillsPanel({ authed, context }) {
           <SkillCard key={skill.id || skill.key} skill={skill}
             action={
               <div style={{ display: 'flex', gap: 6 }}>
-                <button disabled={busy} onClick={() => setEnabled.mutate({ key: skill.key, enabled: !skill.enabled })}
+                <button disabled={busy} onClick={() => setEnabled.mutate({
+                  key: skill.key,
+                  enabled: !skill.enabled,
+                  scope: skill.scope,
+                  targetChatId: skill.targetChatId,
+                })}
                   style={smallButton(skill.enabled ? 'neutral' : 'primary')}>
                   {skill.enabled ? 'Disable' : 'Enable'}
                 </button>
-                <button disabled={busy} onClick={() => deleteSkill.mutate({ key: skill.key })} style={smallButton('ghost')}>
+                <button disabled={busy} onClick={() => deleteSkill.mutate({
+                  key: skill.key,
+                  scope: skill.scope,
+                  targetChatId: skill.targetChatId,
+                })} style={smallButton('ghost')}>
                   Remove
                 </button>
               </div>
@@ -341,11 +352,13 @@ function SkillsPanel({ authed, context }) {
       </SkillSection>
 
       <SkillSection title="Recommended for this mission" meta="Context-aware">
-        {recommended.length === 0 ? (
+        {!activeChatId ? (
+          <SkillEmpty>Open a mission chat to enable mission-only skills.</SkillEmpty>
+        ) : recommended.length === 0 ? (
           <SkillEmpty>Start a mission to see contextual recommendations.</SkillEmpty>
         ) : recommended.map((skill) => (
           <SkillCard key={skill.key} skill={skill} reason={skill.reason}
-            action={<button disabled={busy} onClick={() => accept(skill, 'personal')} style={smallButton('neutral')}>Enable</button>} />
+            action={<button disabled={busy} onClick={() => accept(skill, 'mission')} style={smallButton('neutral')}>Enable for mission</button>} />
         ))}
       </SkillSection>
     </div>

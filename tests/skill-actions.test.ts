@@ -78,4 +78,42 @@ describe('User skills', () => {
     expect(turn.artifacts.find((artifact) => artifact.id === `intake_${turn.id}`)?.preview)
       .toContain('Show visual approval before marking UI work done.');
   });
+
+  it('only injects mission-scoped skills into the targeted chat', async () => {
+    const workbench = await createWorkbench(actor, {
+      name: 'Mission skill test',
+      workspacePath: 'workspaces/mission-skill-test',
+    });
+    const targetChat = await createChat(actor, {
+      workbenchId: workbench.id,
+      title: 'Target mission',
+    });
+    const otherChat = await createChat(actor, {
+      workbenchId: workbench.id,
+      title: 'Other mission',
+    });
+    const missionSkill = await upsertUserSkill(actor, {
+      key: 'visual_approval_required',
+      scope: 'mission',
+      targetChatId: targetChat.id,
+      source: 'recommended',
+      evidence: 'Enabled from the recommended mission section.',
+    });
+
+    const targetTurn = await createTurn({
+      actor,
+      chatId: targetChat.id,
+      message: 'Build a polished landing page UI.',
+    });
+    const otherTurn = await createTurn({
+      actor,
+      chatId: otherChat.id,
+      message: 'Build a polished landing page UI.',
+    });
+
+    expect(missionSkill.scope).toBe('mission');
+    expect(missionSkill.targetChatId).toBe(targetChat.id);
+    expect(targetTurn.mission?.workingStyle.skills.map((skill) => skill.key)).toContain('visual_approval_required');
+    expect(otherTurn.mission?.workingStyle.skills.map((skill) => skill.key)).not.toContain('visual_approval_required');
+  });
 });
