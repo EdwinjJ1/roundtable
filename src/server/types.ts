@@ -160,6 +160,34 @@ export type UserProfile = {
   updatedAt: string;
 };
 
+export type UserSkillSource = 'user' | 'observed' | 'workspace' | 'recommended';
+export type UserSkillScope = 'personal' | 'workspace' | 'mission';
+
+export type UserSkill = {
+  id: string;
+  userId: string;
+  key: string;
+  label: string;
+  description: string;
+  source: UserSkillSource;
+  scope: UserSkillScope;
+  enabled: boolean;
+  evidence: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkingStyleSnapshot = {
+  skills: Array<{
+    key: string;
+    label: string;
+    description: string;
+    source: UserSkillSource;
+    scope: UserSkillScope;
+  }>;
+  projectRules: string[];
+};
+
 export type WorkbenchPin = {
   id: string;
   userId: string;
@@ -329,6 +357,7 @@ export type Mission = {
   chatId: string | null;
   sourceTurnId: string;
   goal: string;
+  workingStyle: WorkingStyleSnapshot;
   status: MissionStatus;
   workflowTemplateId: string;
   workflowTemplateName: string;
@@ -350,6 +379,7 @@ export type LocalTurn = {
   missionId: string;
   workflowTemplateId: string;
   message: string;
+  workingStyle: WorkingStyleSnapshot;
   status: 'pending' | 'done' | 'error';
   createdAt: string;
   provider: string;

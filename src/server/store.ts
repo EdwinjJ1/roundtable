@@ -11,6 +11,7 @@ import type {
   Message,
   Mission,
   UserProfile,
+  UserSkill,
   Workbench,
   WorkbenchPin,
 } from './types.js';
@@ -24,6 +25,7 @@ export type RoundtableData = {
   artifacts: Artifact[];
   handoffs: Handoff[];
   profiles: UserProfile[];
+  userSkills: UserSkill[];
   workbenchPins: WorkbenchPin[];
   turns: LocalTurn[];
   missions: Mission[];
@@ -199,6 +201,7 @@ function emptyData(): RoundtableData {
     artifacts: [],
     handoffs: [],
     profiles: [],
+    userSkills: [],
     workbenchPins: [],
     turns: [],
     missions: [],
@@ -215,6 +218,7 @@ function normalizeData(raw: Partial<RoundtableData>): RoundtableData {
     artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : [],
     handoffs: Array.isArray(raw.handoffs) ? raw.handoffs : [],
     profiles: Array.isArray(raw.profiles) ? raw.profiles : [],
+    userSkills: Array.isArray(raw.userSkills) ? raw.userSkills : [],
     workbenchPins: Array.isArray(raw.workbenchPins) ? raw.workbenchPins : [],
     turns: Array.isArray(raw.turns) ? raw.turns : [],
     missions: Array.isArray(raw.missions) ? raw.missions : [],

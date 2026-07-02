@@ -14,6 +14,7 @@ import type {
   LocalTurn,
   Plan,
   PlanTask,
+  WorkingStyleSnapshot,
   WorkflowRun,
 } from '../types.js';
 import { applyAnswers, assessClarity } from './clarify-actions.js';
@@ -40,6 +41,7 @@ import {
 } from './scheduler.js';
 import { describeFindings, hasBlockingFinding, safetyEnabled, scanArtifact, type SafetyFinding } from './safety.js';
 import { AGENT_ROSTER, mentionedAgents, mentionTokens, messageWithoutMentions, type AgentProfile } from './agent-roster.js';
+import { emptyWorkingStyle, getWorkingStyleSnapshot } from './skill-actions.js';
 
 export type CreateTurnInput = {
   message: string;
@@ -75,6 +77,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
   if (!message) throw new ActionError('missing_message', 400);
   const turnId = input.turnId?.trim() || id('turn');
   const chatId = input.chatId?.trim() || null;
+  const workingStyle = await getWorkingStyleSnapshot(input.actor, chatId);
 
   // Clarify gate: the planner judges whether the request is clear enough to plan.
   // If not, pause here with multiple-choice questions and DON'T build a plan yet —
@@ -92,6 +95,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
       clarifyQuestions: assessment.questions,
       clarifyAnswers: [],
       workflowTemplateId: input.workflowTemplateId,
+      workingStyle,
     });
     const mission = await createMission({
       actor: input.actor,
@@ -102,6 +106,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
       plan: turn.plan,
       needsClarification: true,
       workflowTemplateId: turn.workflowTemplateId,
+      workingStyle,
     });
     const turnWithMission = {
       ...turn,
@@ -121,6 +126,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
     message,
     now,
     workflowTemplateId: input.workflowTemplateId,
+    workingStyle,
   });
   const mission = await createMission({
     actor: input.actor,
@@ -131,6 +137,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
     plan: turn.plan,
     needsClarification: false,
     workflowTemplateId: turn.workflowTemplateId,
+    workingStyle,
   });
   const turnWithMission = {
     ...turn,
@@ -160,22 +167,25 @@ function buildTurn(opts: {
   clarifyAnswers?: ClarifyAnswer[];
   missionId?: string | undefined;
   workflowTemplateId?: string | undefined;
+  workingStyle?: WorkingStyleSnapshot | undefined;
 }): LocalTurn {
   const { turnId, chatId, ownerId, message, now } = opts;
   const parked = opts.needsClarification === true;
+  const workingStyle = opts.workingStyle ?? emptyWorkingStyle();
   const workflowTemplate = opts.workflowTemplateId
     ? workflowTemplateById(opts.workflowTemplateId)
     : selectWorkflowTemplate(message);
   const missionId = opts.missionId ?? id('mission');
   const intake = intakeFromMessage(message);
-  const plan = parked ? { summary: `Awaiting clarification: ${message.slice(0, 80)}`, tasks: [] } : planFromMessage(message);
-  const artifacts = parked ? [] : baseArtifacts(turnId, chatId ?? `local-${turnId}`, message, intake, plan);
+  const plan = parked ? { summary: `Awaiting clarification: ${message.slice(0, 80)}`, tasks: [] } : planFromMessage(message, workingStyle);
+  const artifacts = parked ? [] : baseArtifacts(turnId, chatId ?? `local-${turnId}`, message, intake, plan, workingStyle);
   const mission = buildMissionSnapshot({
     ownerId,
     chatId,
     turnId,
     missionId,
     goal: message,
+    workingStyle,
     plan,
     needsClarification: parked,
     workflowTemplateId: workflowTemplate.id,
@@ -187,6 +197,7 @@ function buildTurn(opts: {
     missionId,
     workflowTemplateId: workflowTemplate.id,
     message,
+    workingStyle,
     status: 'done',
     createdAt: now,
     provider: 'roundtable-local',
@@ -220,6 +231,7 @@ function buildTurn(opts: {
     missionId,
     workflowTemplateId: workflowTemplate.id,
     message,
+    workingStyle,
     status: 'done',
     createdAt: now,
     provider: 'roundtable-local',
@@ -276,6 +288,7 @@ export async function answerClarification(input: {
     clarifyAnswers: input.answers,
     missionId: existing.missionId,
     workflowTemplateId: existing.workflowTemplateId,
+    workingStyle: existing.workingStyle,
   });
   // Preserve the original user-facing message; keep the enriched text in the plan.
   const syncedMission = await updateMissionForPlannedTurn({
@@ -439,7 +452,12 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
       task,
       artifacts: contextArtifacts,
     });
-    const handoffContext = formatHandoffContext(handoffCard, depOutputs);
+    const handoffContext = [
+      formatWorkingStyleForPrompt(turn.workingStyle)
+        ? `# User working style\n\n${formatWorkingStyleForPrompt(turn.workingStyle)}`
+        : '',
+      formatHandoffContext(handoffCard, depOutputs),
+    ].filter(Boolean).join('\n\n---\n\n');
 
     let result;
     let fallbackNote: AgentEvent | null = null;
@@ -924,7 +942,7 @@ function intakeFromMessage(message: string): Intake {
   };
 }
 
-function planFromMessage(message: string): Plan {
+function planFromMessage(message: string, workingStyle: WorkingStyleSnapshot = emptyWorkingStyle()): Plan {
   const goal = messageWithoutMentions(message) || message;
   const base = compactTitle(goal);
   const hasExplicitMention = mentionTokens(message).length > 0;
@@ -939,15 +957,15 @@ function planFromMessage(message: string): Plan {
     return {
       summary: `Plan for: ${base}`,
       tasks: [
-        taskForAgent('task_planning', `Plan ${base}`, planner(), goal, [], false, 'plan'),
-        taskForAgent(`task_${implementer.id}`, titleForAgent(implementer, base), implementer, goal, ['task_planning'], false, 'build'),
-        taskForAgent(`task_${reviewerAgent.id}`, titleForAgent(reviewerAgent, base), reviewerAgent, goal, [`task_${implementer.id}`], false, 'review'),
+        taskForAgent('task_planning', `Plan ${base}`, planner(), goal, [], false, 'plan', workingStyle),
+        taskForAgent(`task_${implementer.id}`, titleForAgent(implementer, base), implementer, goal, ['task_planning'], false, 'build', workingStyle),
+        taskForAgent(`task_${reviewerAgent.id}`, titleForAgent(reviewerAgent, base), reviewerAgent, goal, [`task_${implementer.id}`], false, 'review', workingStyle),
       ],
     };
   }
 
   if (startsWithPlanning || explicitPlanningOnly) {
-    tasks.push(taskForAgent('task_planning', `Plan ${base}`, planner(), goal, [], false, 'plan'));
+    tasks.push(taskForAgent('task_planning', `Plan ${base}`, planner(), goal, [], false, 'plan', workingStyle));
   }
 
   if (!explicitPlanningOnly) {
@@ -962,6 +980,7 @@ function planFromMessage(message: string): Plan {
         previousTaskId ? [previousTaskId] : [],
         false,
         stageIdForAgent(agent),
+        workingStyle,
       ));
       previousTaskId = idValue;
     }
@@ -969,7 +988,7 @@ function planFromMessage(message: string): Plan {
 
   return {
     summary: `Plan for: ${base}`,
-    tasks: tasks.length > 0 ? tasks : [taskForAgent('task_planning', `Plan ${base}`, planner(), goal, [], false, 'plan')],
+    tasks: tasks.length > 0 ? tasks : [taskForAgent('task_planning', `Plan ${base}`, planner(), goal, [], false, 'plan', workingStyle)],
   };
 }
 
@@ -981,7 +1000,9 @@ function taskForAgent(
   deps: string[],
   parallel: boolean,
   stageId: string,
+  workingStyle: WorkingStyleSnapshot = emptyWorkingStyle(),
 ): PlanTask {
+  const styleContext = formatWorkingStyleForPrompt(workingStyle);
   return {
     id: idValue,
     title,
@@ -990,7 +1011,10 @@ function taskForAgent(
     role: agent.role,
     stageId,
     requiredCapabilities: agent.capabilities,
-    brief: `${title}. Agent: ${agent.displayName}. Role: ${agent.role}. User request: ${message}`,
+    brief: [
+      `${title}. Agent: ${agent.displayName}. Role: ${agent.role}. User request: ${message}`,
+      styleContext ? `Working style:\n${styleContext}` : '',
+    ].filter(Boolean).join('\n\n'),
     deps,
     parallel,
   };
@@ -1090,8 +1114,10 @@ function baseArtifacts(
   message: string,
   intake: Intake,
   plan: Plan,
+  workingStyle: WorkingStyleSnapshot = emptyWorkingStyle(),
 ): Artifact[] {
   const createdAt = nowIso();
+  const workingStyleText = formatWorkingStyleForPrompt(workingStyle);
   return [
     {
       id: `intake_${turnId}`,
@@ -1101,7 +1127,15 @@ function baseArtifacts(
       ownerAgentId: 'orchestrator',
       version: 1,
       uri: `turn://${turnId}/intake`,
-      preview: `# Intake\n\n${message}\n\nIntent: ${intake.intentType}\nRisk: ${intake.risk}\n`,
+      preview: [
+        '# Intake',
+        '',
+        message,
+        '',
+        `Intent: ${intake.intentType}`,
+        `Risk: ${intake.risk}`,
+        workingStyleText ? `\n## Working style\n\n${workingStyleText}` : '',
+      ].filter(Boolean).join('\n'),
       code: null,
       createdAt,
     },
@@ -1519,6 +1553,16 @@ function formatHandoffContext(
     '',
     card.risks.length > 0 ? `## Risks\n\n${card.risks.map((risk) => `- ${risk}`).join('\n')}` : '',
   ].filter(Boolean).join('\n');
+}
+
+function formatWorkingStyleForPrompt(workingStyle: WorkingStyleSnapshot | null | undefined): string {
+  const skills = workingStyle?.skills ?? [];
+  const projectRules = workingStyle?.projectRules ?? [];
+  const lines = [
+    ...skills.map((skill) => `- ${skill.label}: ${skill.description}`),
+    ...projectRules.map((rule) => `- Project rule: ${rule}`),
+  ];
+  return lines.join('\n');
 }
 
 function upsertArtifacts(target: Artifact[], artifacts: Artifact[]): void {

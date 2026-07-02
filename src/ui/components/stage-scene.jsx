@@ -15,7 +15,7 @@ import { EditHandoffModal } from './modals';
 import { UserMsg } from './live-turn';
 import { RT } from '../lib/rt';
 
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useMemo, useRef } = React;
 
 /* ---- Aggregate quick actions --------------------------------------------- */
 function Aggregate({ beat, agents, onAction }) {

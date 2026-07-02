@@ -186,7 +186,7 @@ function FileRow({ art, agents, onOpen, activeChatId }) {
     </button>
   );
 }
-function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifact, onAction, onClose, live, liveArtifacts, liveMessages, liveHandoffs, activeChatId, localTurns, localStatus, onApproveLocalTurn, localTurnActions, onRewrite }) {
+function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifact, onAction, onClose, authed, live, liveArtifacts, liveMessages, liveHandoffs, activeChatId, localTurns, localStatus, onApproveLocalTurn, localTurnActions, onRewrite }) {
   const placed = sceneAt(clock).placed;
   const hasLocalTurns = localTurns && localTurns.length > 0;
   const localArtifacts = hasLocalTurns ? liveArtifactsFromTurns(localTurns, agents, localStatus) : [];
@@ -200,6 +200,10 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
   // The fixture "brief" is demo-only — in live mode there are no user-provided artifacts yet.
   const provided = live || hasLocalTurns ? [] : [RT.ARTIFACTS.brief];
   const notes = meetingNotes(clock);
+  const skillContext = [
+    ...(localTurns || []).map((turn) => turn.message),
+    ...(liveMessages || []).filter((message) => message.authorType === 'user').map((message) => message.content),
+  ].filter(Boolean).join(' ');
   const tabBtn = (id, label) => (
     <button onClick={() => setTab(id)} style={{ flex: 1, padding: '10px 0', border: 'none', cursor: 'pointer', font: 'inherit',
       fontSize: 12.5, fontWeight: 600, background: 'transparent', color: tab === id ? 'var(--text)' : 'var(--text-faint)',
@@ -212,6 +216,7 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
         {tabBtn('chat', 'Chat')}
         {tabBtn('files', `Files · ${created.length + provided.length}`)}
         {tabBtn('notes', 'Notes')}
+        {tabBtn('skills', 'Skills')}
         <button onClick={onClose} style={{ ...iconBtn, border: 'none', background: 'transparent' }}><Icon name="x" size={15} /></button>
       </div>
       <div style={{ borderBottom: '1px solid var(--border)' }} />
@@ -241,6 +246,8 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
             ? <div style={{ fontSize: 12.5, color: 'var(--text-faint)', fontStyle: 'italic', padding: '4px 2px' }}>Nothing yet — artifacts land here as the team works.</div>
             : created.map((a) => <FileRow key={a.id} art={a} agents={agents} onOpen={onOpenArtifact} activeChatId={activeChatId} />)}
         </div>
+      ) : tab === 'skills' ? (
+        <SkillsPanel authed={authed} context={skillContext} />
       ) : live || hasLocalTurns ? (
         <LiveNotes agents={agents} artifacts={created} handoffs={liveHandoffs} />
       ) : (
@@ -248,6 +255,167 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
       )}
     </div>
   );
+}
+
+function SkillsPanel({ authed, context }) {
+  const utils = trpc.useUtils();
+  const skillsQ = trpc.userSkills.list.useQuery(undefined, { enabled: !!authed });
+  const suggestionsQ = trpc.userSkills.suggestions.useQuery(undefined, { enabled: !!authed });
+  const recommendedQ = trpc.userSkills.recommended.useQuery({ context }, { enabled: !!authed });
+  const upsertSkill = trpc.userSkills.upsert.useMutation({
+    onSuccess: () => {
+      utils.userSkills.list.invalidate();
+      utils.userSkills.suggestions.invalidate();
+    },
+  });
+  const setEnabled = trpc.userSkills.setEnabled.useMutation({
+    onSuccess: () => {
+      utils.userSkills.list.invalidate();
+      utils.userSkills.suggestions.invalidate();
+    },
+  });
+  const deleteSkill = trpc.userSkills.delete.useMutation({
+    onSuccess: () => {
+      utils.userSkills.list.invalidate();
+      utils.userSkills.suggestions.invalidate();
+    },
+  });
+
+  if (!authed) {
+    return (
+      <div style={{ flex: 1, padding: '16px 16px 24px' }}>
+        <div style={{ fontSize: 12.5, color: 'var(--text-faint)', fontStyle: 'italic' }}>
+          Sign in to manage skills and persistent working style.
+        </div>
+      </div>
+    );
+  }
+
+  const active = skillsQ.data || [];
+  const activeKeys = new Set(active.map((skill) => skill.key));
+  const suggested = (suggestionsQ.data || []).filter((skill) => !activeKeys.has(skill.key));
+  const recommended = (recommendedQ.data || []).filter((skill) => !activeKeys.has(skill.key));
+  const busy = upsertSkill.isPending || setEnabled.isPending || deleteSkill.isPending;
+  const accept = (skill, scope = skill.scope || 'personal') => {
+    upsertSkill.mutate({
+      key: skill.key,
+      label: skill.label,
+      description: skill.description,
+      source: skill.source,
+      scope,
+      evidence: skill.evidence,
+      enabled: true,
+    });
+  };
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '16px 16px 24px', display: 'grid', gap: 16 }}>
+      <SkillSection title="Active skills" meta={`${active.filter((skill) => skill.enabled).length} enabled`}>
+        {skillsQ.isLoading ? (
+          <SkillEmpty>Loading skills...</SkillEmpty>
+        ) : active.length === 0 ? (
+          <SkillEmpty>No skills enabled yet.</SkillEmpty>
+        ) : active.map((skill) => (
+          <SkillCard key={skill.id || skill.key} skill={skill}
+            action={
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button disabled={busy} onClick={() => setEnabled.mutate({ key: skill.key, enabled: !skill.enabled })}
+                  style={smallButton(skill.enabled ? 'neutral' : 'primary')}>
+                  {skill.enabled ? 'Disable' : 'Enable'}
+                </button>
+                <button disabled={busy} onClick={() => deleteSkill.mutate({ key: skill.key })} style={smallButton('ghost')}>
+                  Remove
+                </button>
+              </div>
+            } />
+        ))}
+      </SkillSection>
+
+      <SkillSection title="Suggested for you" meta="Observed from workflow">
+        {suggested.length === 0 ? (
+          <SkillEmpty>No new suggestions right now.</SkillEmpty>
+        ) : suggested.map((skill) => (
+          <SkillCard key={skill.key} skill={skill} reason={skill.reason}
+            action={<button disabled={busy} onClick={() => accept(skill, 'personal')} style={smallButton('primary')}>Accept</button>} />
+        ))}
+      </SkillSection>
+
+      <SkillSection title="Recommended for this mission" meta="Context-aware">
+        {recommended.length === 0 ? (
+          <SkillEmpty>Start a mission to see contextual recommendations.</SkillEmpty>
+        ) : recommended.map((skill) => (
+          <SkillCard key={skill.key} skill={skill} reason={skill.reason}
+            action={<button disabled={busy} onClick={() => accept(skill, 'personal')} style={smallButton('neutral')}>Enable</button>} />
+        ))}
+      </SkillSection>
+    </div>
+  );
+}
+
+function SkillSection({ title, meta, children }) {
+  return (
+    <section style={{ display: 'grid', gap: 9 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 800 }}>{title}</div>
+        <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '.06em' }}>{meta}</span>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function SkillCard({ skill, reason, action }) {
+  const enabled = skill.enabled !== false;
+  return (
+    <div style={{ padding: '10px 11px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border)',
+      background: enabled ? 'var(--surface)' : 'var(--surface-2)', display: 'grid', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start' }}>
+        <span style={{ display: 'grid', placeItems: 'center', width: 26, height: 26, borderRadius: 7,
+          background: enabled ? tint('var(--accent)', 14) : 'var(--surface-3)', color: enabled ? 'var(--accent)' : 'var(--text-faint)', flexShrink: 0 }}>
+          <Icon name={enabled ? 'sparkle' : 'pause'} size={13} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 13, fontWeight: 800 }}>{skill.label}</div>
+            <SkillBadge>{skill.scope || 'personal'}</SkillBadge>
+            <SkillBadge>{skill.source || 'user'}</SkillBadge>
+          </div>
+          <div style={{ marginTop: 3, fontSize: 12.2, color: 'var(--text-muted)', lineHeight: 1.45 }}>{skill.description}</div>
+          {reason && <div style={{ marginTop: 5, fontSize: 11.5, color: 'var(--text-faint)', lineHeight: 1.4 }}>{reason}</div>}
+        </div>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>{action}</div>
+    </div>
+  );
+}
+
+function SkillBadge({ children }) {
+  return (
+    <span style={{ padding: '1px 6px', borderRadius: 5, background: 'var(--surface-3)', color: 'var(--text-faint)',
+      fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.04em' }}>{children}</span>
+  );
+}
+
+function SkillEmpty({ children }) {
+  return (
+    <div style={{ fontSize: 12.5, color: 'var(--text-faint)', fontStyle: 'italic', padding: '8px 2px' }}>{children}</div>
+  );
+}
+
+function smallButton(kind) {
+  const primary = kind === 'primary';
+  const ghost = kind === 'ghost';
+  return {
+    padding: '5px 9px',
+    borderRadius: 'var(--r-sm)',
+    border: primary ? 'none' : '1px solid var(--border)',
+    background: primary ? 'var(--accent)' : ghost ? 'transparent' : 'var(--surface-2)',
+    color: primary ? '#fff' : 'var(--text-muted)',
+    font: 'inherit',
+    fontSize: 11.5,
+    fontWeight: 700,
+    cursor: 'pointer',
+  };
 }
 
 /* ---- live notes: real deliverables + hand-offs for the selected chat ------ */
