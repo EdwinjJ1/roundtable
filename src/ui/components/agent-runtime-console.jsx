@@ -75,6 +75,7 @@ function AgentRuntimeConsole() {
               runtime: agent.runtime,
               command: agent.command || '',
               model: agent.model || '',
+              modelProvider: agent.modelProvider || '',
               argsText: (agent.args || []).join(' '),
             };
           }
@@ -88,6 +89,7 @@ function AgentRuntimeConsole() {
             next[runtime.kind] = {
               command: runtime.command || '',
               model: runtime.model || '',
+              modelProvider: runtime.modelProvider || '',
               argsText: (runtime.args || []).join(' '),
               envText: '',
               clearEnv: false,
@@ -112,11 +114,14 @@ function AgentRuntimeConsole() {
   }, [hasRunning]);
 
   const runtimeOptions = state?.supported || [];
+  const modelProviderOptions = state?.modelProviders || [];
   const agents = state?.agents || [];
   const conversations = state?.conversations || [];
   const executionAdapter = state?.executionAdapter || 'local-dispatch';
   const executionSource = state?.executionAdapterSource || 'built-in';
+  const executionModelProvider = state?.executionModelProvider || null;
   const workflowUsesAgentCli = executionAdapter === 'agent-cli';
+  const workflowUsesModelApi = executionSource === 'model-provider' || executionAdapter === 'minimax' || executionAdapter === 'openai-compat';
 
   const updateDraft = (agentId, patch) => {
     setDrafts((prev) => ({ ...prev, [agentId]: { ...(prev[agentId] || {}), ...patch } }));
@@ -138,6 +143,7 @@ function AgentRuntimeConsole() {
           runtime: draft.runtime,
           command: draft.command || null,
           model: draft.model || null,
+          modelProvider: draft.modelProvider || null,
           args: splitArgs(draft.argsText || ''),
         }),
       });
@@ -158,6 +164,7 @@ function AgentRuntimeConsole() {
       runtime: runtimeKind,
       command: draft.command || null,
       model: draft.model || null,
+      modelProvider: draft.modelProvider || null,
       args: splitArgs(draft.argsText || ''),
       clearEnv: Boolean(draft.clearEnv),
     };
@@ -193,6 +200,24 @@ function AgentRuntimeConsole() {
       });
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.error || 'activate_agent_cli_failed');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActivatingAgentCli(false);
+    }
+  };
+
+  const clearExecutionOverride = async () => {
+    setActivatingAgentCli(true);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ defaultAgentAdapter: null }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'clear_agent_cli_failed');
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -244,10 +269,15 @@ function AgentRuntimeConsole() {
           <span style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{conversations.filter((item) => item.status === 'running').length} running</span>
         </div>
         <div style={{ flex: 1 }} />
-        <span className="mono" style={{ fontSize: 11.5, color: workflowUsesAgentCli ? 'var(--ok)' : 'var(--warn)',
+        <span className="mono" style={{ fontSize: 11.5, color: workflowUsesAgentCli || workflowUsesModelApi ? 'var(--ok)' : 'var(--warn)',
           padding: '6px 9px', borderRadius: 7, border: '1px solid var(--border)', background: 'var(--surface-2)' }}>
-          workflow: {executionAdapter} · {executionSource}
+          workflow: {executionAdapter} · {sourceLabel(executionSource, executionModelProvider)}
         </span>
+        {workflowUsesAgentCli && (
+          <button onClick={clearExecutionOverride} style={btn}>
+            <Icon name="wrench" size={14} /> {activatingAgentCli ? 'Switching' : 'Use Auto'}
+          </button>
+        )}
         {!workflowUsesAgentCli && (
           <button onClick={activateAgentCli} style={{ ...btn, background: 'var(--accent)', color: '#fff', border: 'none' }}>
             <Icon name="code" size={14} /> {activatingAgentCli ? 'Switching' : 'Use Agent CLI'}
@@ -260,7 +290,7 @@ function AgentRuntimeConsole() {
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(360px, 520px) minmax(0, 1fr)', gap: 16,
         padding: 16, flex: 1, minHeight: 0 }}>
         <section style={{ ...card, overflow: 'hidden', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <div style={sectionHead}>Agent Configuration</div>
+          <div style={sectionHead}>Agent CLI Overrides</div>
           <div style={{ overflowY: 'auto', padding: 10, display: 'grid', gap: 8 }}>
             {agents.map((agent) => {
               const draft = drafts[agent.id] || {};
@@ -285,6 +315,14 @@ function AgentRuntimeConsole() {
                     </select>
                     <input value={draft.model || ''} onChange={(e) => updateDraft(agent.id, { model: e.target.value })}
                       placeholder="model" style={field} />
+                    <select value={draft.modelProvider || ''} onChange={(e) => updateDraft(agent.id, { modelProvider: e.target.value })} style={{ ...field, gridColumn: '1 / -1' }}>
+                      <option value="">API provider: runtime default</option>
+                      {modelProviderOptions.map((provider) => (
+                        <option key={provider.provider} value={provider.provider}>
+                          {provider.label}{provider.configured ? '' : ' (not configured)'}
+                        </option>
+                      ))}
+                    </select>
                     <input value={draft.command || ''} onChange={(e) => updateDraft(agent.id, { command: e.target.value })}
                       placeholder="command override" style={{ ...field, gridColumn: '1 / -1' }} />
                     <input value={draft.argsText || ''} onChange={(e) => updateDraft(agent.id, { argsText: e.target.value })}
@@ -308,7 +346,7 @@ function AgentRuntimeConsole() {
 
         <section style={{ display: 'grid', gridTemplateRows: 'auto minmax(0, 1fr)', gap: 16, minHeight: 0 }}>
           <div style={{ ...card, overflow: 'hidden' }}>
-            <div style={sectionHead}>Runtime Settings</div>
+            <div style={sectionHead}>CLI Runtime Overrides</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 8, padding: 10 }}>
               {runtimeOptions.map((runtime) => {
                 const draft = runtimeDrafts[runtime.kind] || {};
@@ -339,6 +377,14 @@ function AgentRuntimeConsole() {
                             placeholder={runtime.binary ? `command (${runtime.binary})` : 'command'} style={field} />
                           <input value={draft.model || ''} onChange={(e) => updateRuntimeDraft(runtime.kind, { model: e.target.value })}
                             placeholder="model" style={field} />
+                          <select value={draft.modelProvider || ''} onChange={(e) => updateRuntimeDraft(runtime.kind, { modelProvider: e.target.value })} style={{ ...field, gridColumn: '1 / -1' }}>
+                            <option value="">API provider: none</option>
+                            {modelProviderOptions.map((provider) => (
+                              <option key={provider.provider} value={provider.provider}>
+                                {provider.label}{provider.configured ? '' : ' (not configured)'}
+                              </option>
+                            ))}
+                          </select>
                           <input value={draft.argsText || ''} onChange={(e) => updateRuntimeDraft(runtime.kind, { argsText: e.target.value })}
                             placeholder="args, use {prompt}" style={{ ...field, gridColumn: '1 / -1' }} />
                           <textarea value={draft.envText || ''} onChange={(e) => updateRuntimeDraft(runtime.kind, { envText: e.target.value })}
@@ -449,6 +495,15 @@ function runtimeCommandLabel(runtime) {
   if (runtime.binary) return runtime.binary;
   if (runtime.kind === 'custom-cli') return 'ROUNDTABLE_AGENT_COMMAND';
   return 'built in';
+}
+
+function sourceLabel(source, modelProvider) {
+  if (source === 'model-provider') return modelProvider || 'model API';
+  return {
+    settings: 'settings',
+    env: 'env',
+    'built-in': 'built in',
+  }[source] || 'auto';
 }
 
 function roleColor(role) {

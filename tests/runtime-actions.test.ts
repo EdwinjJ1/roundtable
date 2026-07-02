@@ -29,6 +29,9 @@ afterEach(async () => {
   delete process.env.ROUNDTABLE_AGENT_ADAPTER;
   delete process.env.ROUNDTABLE_AGENT_RUNTIME;
   delete process.env.ROUNDTABLE_CLAUDE_CODE_ARGS;
+  delete process.env.MINIMAX_API_KEY;
+  delete process.env.MINIMAX_BASE_URL;
+  delete process.env.MINIMAX_MODEL;
   delete process.env.ROUNDTABLE_CODEX_ARGS;
   delete process.env.ROUNDTABLE_OPENCODE_ARGS;
   await rm(tempDir, { recursive: true, force: true });
@@ -125,6 +128,23 @@ describe('runtime config and workflow dispatch integration', () => {
       executionAdapterSource: 'env',
     });
 
+    delete process.env.ROUNDTABLE_AGENT_ADAPTER;
+    await saveSettings({
+      providers: [{
+        provider: 'openai-compatible',
+        enabled: true,
+        baseUrl: 'https://api.deepseek.com/v1',
+        model: 'deepseek-chat',
+        apiKey: 'deepseek-secret',
+      }],
+    });
+
+    expect(await listRuntimeState()).toMatchObject({
+      executionAdapter: 'openai-compat',
+      executionAdapterSource: 'model-provider',
+      executionModelProvider: 'openai-compatible',
+    });
+
     await saveSettings({ defaultAgentAdapter: 'agent-cli' });
 
     expect(await listRuntimeState()).toMatchObject({
@@ -156,6 +176,47 @@ describe('runtime config and workflow dispatch integration', () => {
     });
     expect(JSON.stringify(state)).not.toContain('secret-key');
     expect(stored?.env).toEqual({ ANTHROPIC_API_KEY: 'secret-key' });
+  });
+
+  it('configures Claude Code Router with a saved MiniMax provider without exposing the key', async () => {
+    await saveSettings({
+      providers: [{
+        provider: 'minimax',
+        enabled: true,
+        baseUrl: 'https://api.minimaxi.com/v1',
+        model: 'MiniMax-M2.7',
+        apiKey: 'mini-secret',
+      }],
+    });
+    await saveRuntimeDefaultConfig({
+      runtime: 'claude-code-router',
+      command: process.execPath,
+      modelProvider: 'minimax',
+    });
+    await saveAgentRuntimeConfig({
+      agentId: 'atlas',
+      runtime: 'claude-code-router',
+    });
+
+    const state = await listRuntimeState();
+    const router = state.supported.find((item) => item.kind === 'claude-code-router');
+    const atlas = state.agents.find((item) => item.id === 'atlas');
+
+    expect(router).toMatchObject({
+      command: process.execPath,
+      modelProvider: 'minimax',
+      configured: true,
+      ready: true,
+    });
+    expect(atlas).toMatchObject({
+      runtime: 'claude-code-router',
+      modelProvider: 'minimax',
+      configured: true,
+    });
+    expect(state.modelProviders.find((provider) => provider.provider === 'minimax')).toMatchObject({
+      configured: true,
+    });
+    expect(JSON.stringify(state)).not.toContain('mini-secret');
   });
 
   it('dispatches an agent task through the saved CLI runtime and records the conversation', async () => {
@@ -231,6 +292,7 @@ function runtimeConfig(agentId: string, runtime: AgentRuntimeKind, args: string[
     args,
     env: {},
     model: null,
+    modelProvider: null,
     updatedAt: new Date(0).toISOString(),
   };
 }

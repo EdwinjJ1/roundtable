@@ -44,6 +44,16 @@ export const RUNTIME_DEFINITIONS: RuntimeDefinition[] = [
     structured: true,
   },
   {
+    kind: 'claude-code-router',
+    label: 'Claude Code + API Router',
+    description: 'Claude Code through claude-code-router, backed by a configured OpenAI-compatible API provider such as MiniMax.',
+    binary: 'ccr',
+    installHint: 'npm install -g @musistudio/claude-code-router, then choose a model API provider in Roundtable.',
+    envKeys: [],
+    modelEnvKeys: ['LLM_MODEL', 'OPENAI_MODEL'],
+    structured: true,
+  },
+  {
     kind: 'codex',
     label: 'Codex CLI',
     description: 'OpenAI Codex CLI using codex exec --json.',
@@ -74,6 +84,7 @@ export function normalizeRuntimeKind(value: string | null | undefined): AgentRun
   if (!raw) return null;
   if (raw === 'local' || raw === 'local-dispatch') return 'local-dispatch';
   if (raw === 'custom' || raw === 'custom-cli' || raw === 'agent-cli' || raw === 'external-cli') return 'custom-cli';
+  if (raw === 'claude-code-router' || raw === 'claude-router' || raw === 'ccr') return 'claude-code-router';
   if (raw === 'claude' || raw === 'claude-code' || raw === 'claude-cli') return 'claude-code';
   if (raw === 'codex' || raw === 'codex-cli' || raw === 'openai-codex') return 'codex';
   if (raw === 'opencode' || raw === 'open-code' || raw === 'opencode-cli') return 'opencode';
@@ -132,6 +143,7 @@ export function mergedRuntimeConfigForAgent(
     args: agentConfig?.args.length ? agentConfig.args : defaultConfig?.args ?? [],
     env: { ...(defaultConfig?.env ?? {}), ...(agentConfig?.env ?? {}) },
     model: agentConfig?.model ?? defaultConfig?.model ?? null,
+    modelProvider: agentConfig?.modelProvider ?? defaultConfig?.modelProvider ?? null,
     updatedAt: agentConfig?.updatedAt ?? defaultConfig?.updatedAt ?? new Date(0).toISOString(),
   };
 }

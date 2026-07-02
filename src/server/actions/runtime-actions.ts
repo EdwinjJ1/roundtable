@@ -8,6 +8,7 @@ import type {
   AgentRuntimeDefaultConfig,
   AgentRuntimeKind,
   Actor,
+  ModelProviderKind,
 } from '../types.js';
 import { AGENT_ROSTER, type AgentProfile } from './agent-roster.js';
 import {
@@ -20,6 +21,12 @@ import {
   runtimeDefinition,
 } from './cli-runtimes/registry.js';
 import {
+  isModelProviderConfigured,
+  MODEL_PROVIDER_DEFINITIONS,
+  resolveDefaultAgentAdapterState,
+  type AgentAdapterResolution,
+} from './settings-actions.js';
+import {
   executeCliRuntime,
   stopActiveRuntimeConversation,
   type RuntimeExecutionCallbacks,
@@ -28,7 +35,8 @@ import {
 
 export type RuntimeState = {
   executionAdapter: string;
-  executionAdapterSource: 'settings' | 'env' | 'built-in';
+  executionAdapterSource: AgentAdapterResolution['source'];
+  executionModelProvider: AgentAdapterResolution['modelProvider'];
   supported: Array<{
     kind: AgentRuntimeKind;
     label: string;
@@ -38,6 +46,7 @@ export type RuntimeState = {
     command: string | null;
     args: string[];
     model: string | null;
+    modelProvider: ModelProviderKind | null;
     configured: boolean;
     configuredEnvKeys: string[];
     requiredEnvKeys: string[];
@@ -52,6 +61,12 @@ export type RuntimeState = {
     command: string | null;
     args: string[];
     model: string | null;
+    modelProvider: ModelProviderKind | null;
+    configured: boolean;
+  }>;
+  modelProviders: Array<{
+    provider: ModelProviderKind;
+    label: string;
     configured: boolean;
   }>;
   conversations: AgentRuntimeConversation[];
@@ -59,7 +74,7 @@ export type RuntimeState = {
 
 export async function listRuntimeState(): Promise<RuntimeState> {
   const data = await readData();
-  const execution = effectiveExecutionAdapter(data.settings.defaultAgentAdapter);
+  const execution = await resolveDefaultAgentAdapterState(data);
   const supported = await Promise.all(RUNTIME_DEFINITIONS.map(async (definition) => {
     const defaultConfig = runtimeDefaultConfigForKind(definition.kind, data.agentRuntimeDefaults);
     const readiness = await runtimeReadiness(definition.kind, defaultConfig);
@@ -72,6 +87,7 @@ export async function listRuntimeState(): Promise<RuntimeState> {
       command: defaultConfig?.command ?? null,
       args: defaultConfig?.args ?? [],
       model: defaultConfig?.model ?? null,
+      modelProvider: defaultConfig?.modelProvider ?? null,
       configured: defaultConfig !== null,
       configuredEnvKeys: Object.keys(defaultConfig?.env ?? {}).sort(),
       requiredEnvKeys: definition.envKeys,
@@ -81,22 +97,37 @@ export async function listRuntimeState(): Promise<RuntimeState> {
   }));
   const agents = AGENT_ROSTER.map((agent) => {
     const config = runtimeConfigForAgent(agent, data.agentRuntimeConfigs);
+    const runtime = config?.runtime ?? configuredRuntimeForAgent(agent, data.agentRuntimeConfigs);
+    const merged = mergedRuntimeConfigForAgent(
+      agent,
+      runtime,
+      data.agentRuntimeConfigs,
+      data.agentRuntimeDefaults,
+    );
     return {
       id: agent.id,
       name: agent.displayName,
       role: agent.role,
-      runtime: config?.runtime ?? configuredRuntimeForAgent(agent, data.agentRuntimeConfigs),
-      command: config?.command ?? null,
-      args: config?.args ?? [],
-      model: config?.model ?? null,
+      runtime,
+      command: merged?.command ?? null,
+      args: merged?.args ?? [],
+      model: merged?.model ?? null,
+      modelProvider: merged?.modelProvider ?? null,
       configured: config !== null,
     };
   });
+  const modelProviders = await Promise.all(MODEL_PROVIDER_DEFINITIONS.map(async (definition) => ({
+    provider: definition.provider,
+    label: definition.label,
+    configured: await isModelProviderConfigured(definition.provider),
+  })));
   return {
     executionAdapter: execution.value,
     executionAdapterSource: execution.source,
+    executionModelProvider: execution.modelProvider,
     supported,
     agents,
+    modelProviders,
     conversations: [...data.agentRuntimeConversations]
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
       .slice(0, 80),
@@ -110,6 +141,7 @@ export async function saveAgentRuntimeConfig(input: {
   args?: string[] | undefined;
   env?: Record<string, string> | undefined;
   model?: string | null | undefined;
+  modelProvider?: string | null | undefined;
   actor?: Actor | null | undefined;
 }): Promise<AgentRuntimeConfig> {
   const agent = agentById(input.agentId);
@@ -123,6 +155,7 @@ export async function saveAgentRuntimeConfig(input: {
     args: input.args?.map((arg) => arg.trim()).filter(Boolean) ?? [],
     env: sanitizeEnv(input.env ?? {}),
     model: clean(input.model) ?? null,
+    modelProvider: normalizeModelProvider(input.modelProvider),
     updatedAt: nowIso(),
   };
   await mutateData((data) => {
@@ -141,6 +174,7 @@ export async function saveRuntimeDefaultConfig(input: {
   env?: Record<string, string> | undefined;
   clearEnv?: boolean | undefined;
   model?: string | null | undefined;
+  modelProvider?: string | null | undefined;
   actor?: Actor | null | undefined;
 }): Promise<AgentRuntimeDefaultConfig> {
   const runtime = normalizeRuntimeKind(input.runtime);
@@ -159,6 +193,7 @@ export async function saveRuntimeDefaultConfig(input: {
       args: input.args?.map((arg) => arg.trim()).filter(Boolean) ?? [],
       env,
       model: clean(input.model) ?? null,
+      modelProvider: normalizeModelProvider(input.modelProvider),
       updatedAt: nowIso(),
     };
     data.agentRuntimeDefaults = [
@@ -348,25 +383,14 @@ function clean(value: string | null | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-function effectiveExecutionAdapter(
-  saved: string | null | undefined,
-): { value: string; source: 'settings' | 'env' | 'built-in' } {
-  const fromSettings = normalizeExecutionAdapter(saved);
-  if (fromSettings) return { value: fromSettings, source: 'settings' };
-  const fromEnv = normalizeExecutionAdapter(process.env.ROUNDTABLE_AGENT_ADAPTER);
-  if (fromEnv) return { value: fromEnv, source: 'env' };
-  return { value: 'local-dispatch', source: 'built-in' };
-}
-
-function normalizeExecutionAdapter(value: string | null | undefined): string | null {
+function normalizeModelProvider(value: string | null | undefined): ModelProviderKind | null {
   const raw = clean(value)?.toLowerCase();
-  if (!raw) return null;
+  if (!raw || raw === 'none') return null;
   if (raw === 'minimax') return 'minimax';
-  if (raw === 'openai-compat' || raw === 'openai' || raw === 'deepseek') return 'openai-compat';
-  if (raw === 'agent-cli' || raw === 'external-cli' || raw === 'cli-runtime' || raw === 'runtime' || raw === 'cli') return 'agent-cli';
-  if (raw === 'e2b') return 'e2b';
-  if (raw === 'local' || raw === 'local-dispatch') return 'local-dispatch';
-  return raw;
+  if (raw === 'openai-compatible' || raw === 'openai-compat' || raw === 'openai' || raw === 'deepseek') {
+    return 'openai-compatible';
+  }
+  throw new RuntimeActionError('model_provider_not_supported', 400);
 }
 
 function sanitizeEnv(env: Record<string, string>): Record<string, string> {
@@ -397,6 +421,10 @@ async function runtimeReadiness(
 
   const commandFound = await commandAvailable(command);
   if (!commandFound) return { ready: false, reason: `Missing command: ${command}` };
+
+  if (defaultConfig?.modelProvider && !(await isModelProviderConfigured(defaultConfig.modelProvider))) {
+    return { ready: false, reason: `Missing API provider key: ${defaultConfig.modelProvider}` };
+  }
 
   const env = { ...process.env, ...(defaultConfig?.env ?? {}) };
   const hasEnv = definition.envKeys.length === 0 || definition.envKeys.some((key) => Boolean(env[key]));
@@ -431,7 +459,7 @@ async function binaryOnPath(binary: string): Promise<boolean> {
   return false;
 }
 
-function runtimeTimeoutMs(): number {
+function runtimeTimeoutMs(): number | undefined {
   const parsed = Number(process.env.ROUNDTABLE_AGENT_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 120_000;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }

@@ -230,10 +230,28 @@ function normalizeData(raw: Partial<RoundtableData>): RoundtableData {
     workbenchPins: Array.isArray(raw.workbenchPins) ? raw.workbenchPins : [],
     turns: Array.isArray(raw.turns) ? raw.turns : [],
     missions: Array.isArray(raw.missions) ? raw.missions : [],
-    agentRuntimeConfigs: Array.isArray(raw.agentRuntimeConfigs) ? raw.agentRuntimeConfigs : [],
-    agentRuntimeDefaults: Array.isArray(raw.agentRuntimeDefaults) ? raw.agentRuntimeDefaults : [],
+    agentRuntimeConfigs: Array.isArray(raw.agentRuntimeConfigs)
+      ? raw.agentRuntimeConfigs.map(normalizeRuntimeConfig)
+      : [],
+    agentRuntimeDefaults: Array.isArray(raw.agentRuntimeDefaults)
+      ? raw.agentRuntimeDefaults.map(normalizeRuntimeDefault)
+      : [],
     agentRuntimeConversations: Array.isArray(raw.agentRuntimeConversations) ? raw.agentRuntimeConversations : [],
     settings: normalizeSettings(raw.settings),
+  };
+}
+
+function normalizeRuntimeConfig(config: AgentRuntimeConfig): AgentRuntimeConfig {
+  return {
+    ...config,
+    modelProvider: config.modelProvider ?? null,
+  };
+}
+
+function normalizeRuntimeDefault(config: AgentRuntimeDefaultConfig): AgentRuntimeDefaultConfig {
+  return {
+    ...config,
+    modelProvider: config.modelProvider ?? null,
   };
 }
 

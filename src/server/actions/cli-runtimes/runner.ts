@@ -1,5 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import type { AgentEvent, AgentRuntimeConfig, AgentRuntimeKind } from '../../types.js';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import type { AgentEvent, AgentRuntimeConfig, AgentRuntimeKind, ModelProviderKind } from '../../types.js';
+import { resolveModelProvider } from '../settings-actions.js';
 import type { AgentProfile } from '../agent-roster.js';
 import { envKey, runtimeDefinition } from './registry.js';
 
@@ -29,7 +32,7 @@ export type RuntimeExecutionInput = {
   config: AgentRuntimeConfig | null;
   workspace: string;
   prompt: string;
-  timeoutMs: number;
+  timeoutMs?: number | undefined;
   envSnapshot?: NodeJS.ProcessEnv | undefined;
   callbacks?: RuntimeExecutionCallbacks | undefined;
 };
@@ -45,7 +48,7 @@ export function stopActiveRuntimeConversation(conversationId: string): boolean {
 }
 
 export async function executeCliRuntime(input: RuntimeExecutionInput): Promise<RuntimeExecutionResult> {
-  const commandSpec = commandForRuntime(input);
+  const commandSpec = await commandForRuntime(input);
   const events: AgentEvent[] = [];
   let stdout = '';
   let stderr = '';
@@ -92,16 +95,18 @@ export async function executeCliRuntime(input: RuntimeExecutionInput): Promise<R
     stderr += chunk;
   });
 
-  const timer = setTimeout(() => {
-    timedOut = true;
-    killProcess(child);
-  }, input.timeoutMs);
+  const timer = input.timeoutMs
+    ? setTimeout(() => {
+        timedOut = true;
+        killProcess(child);
+      }, input.timeoutMs)
+    : null;
 
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.on('error', reject);
     child.on('close', (code) => resolve(code ?? 1));
   });
-  clearTimeout(timer);
+  if (timer) clearTimeout(timer);
   activeProcesses.delete(input.conversationId);
   await pending;
   await parser.flush(emit);
@@ -137,9 +142,9 @@ type CommandSpec = {
   display: string;
 };
 
-function commandForRuntime(input: RuntimeExecutionInput): CommandSpec {
+async function commandForRuntime(input: RuntimeExecutionInput): Promise<CommandSpec> {
   const runtimeEnv = input.envSnapshot ?? process.env;
-  const env = buildRuntimeEnv(input.runtime, input.config, runtimeEnv);
+  const env = await buildRuntimeEnv(input.runtime, input.config, runtimeEnv);
   if (input.runtime === 'custom-cli') return customCommand(input, env);
 
   const command = input.config?.command
@@ -150,6 +155,13 @@ function commandForRuntime(input: RuntimeExecutionInput): CommandSpec {
   if (input.runtime === 'claude-code') {
     const args = configuredRuntimeArgs(input)
       ?? ['-p', input.prompt, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions'];
+    return commandSpec(command, args, null, env);
+  }
+
+  if (input.runtime === 'claude-code-router') {
+    await prepareClaudeCodeRouterConfig(input, env);
+    const args = configuredRuntimeArgs(input)
+      ?? ['code', '-p', input.prompt, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions'];
     return commandSpec(command, args, null, env);
   }
 
@@ -218,22 +230,27 @@ function commandSpec(command: string, args: string[], stdin: string | null, env:
 
 function configuredRuntimeArgs(input: RuntimeExecutionInput): string[] | null {
   const runtimeEnv = input.envSnapshot ?? process.env;
-  const promptMode = input.runtime === 'claude-code' ? 'argv' : 'stdin';
+  const promptMode = input.runtime === 'claude-code' || input.runtime === 'claude-code-router' ? 'argv' : 'stdin';
   if (input.config?.args.length) return substitutePrompt(input.config.args, input.prompt, promptMode);
   const raw = runtimeEnv[`ROUNDTABLE_${runtimeEnvName(input.runtime)}_ARGS`];
   if (!raw) return null;
   return substitutePrompt(splitArgs(raw), input.prompt, promptMode);
 }
 
-function buildRuntimeEnv(
+async function buildRuntimeEnv(
   runtime: AgentRuntimeKind,
   config: AgentRuntimeConfig | null,
   runtimeEnv: NodeJS.ProcessEnv,
-): NodeJS.ProcessEnv {
+): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = { ...runtimeEnv, ...(config?.env ?? {}) };
-  const model = runtimeModel(runtime, config, runtimeEnv);
+  await applyModelProviderEnv(env, config?.modelProvider ?? null);
+  const model = runtimeModel(runtime, config, env);
   if (model) {
     if (runtime === 'claude-code') env.CLAUDE_MODEL = model;
+    if (runtime === 'claude-code-router') {
+      env.LLM_MODEL = model;
+      env.OPENAI_MODEL = model;
+    }
     if (runtime === 'codex') env.CODEX_MODEL = model;
     if (runtime === 'opencode') env.OPENCODE_MODEL = model;
   }
@@ -253,9 +270,85 @@ function runtimeModel(
 ): string {
   if (config?.model) return config.model;
   if (runtime === 'claude-code') return runtimeEnv.CLAUDE_MODEL || runtimeEnv.LLM_MODEL || '';
+  if (runtime === 'claude-code-router') return runtimeEnv.LLM_MODEL || runtimeEnv.OPENAI_MODEL || '';
   if (runtime === 'codex') return runtimeEnv.CODEX_MODEL || runtimeEnv.OPENAI_MODEL || runtimeEnv.LLM_MODEL || '';
   if (runtime === 'opencode') return runtimeEnv.OPENCODE_MODEL || runtimeEnv.LLM_MODEL || '';
   return '';
+}
+
+async function applyModelProviderEnv(
+  env: NodeJS.ProcessEnv,
+  provider: ModelProviderKind | null,
+): Promise<void> {
+  if (!provider) return;
+  const resolved = await resolveModelProvider(provider);
+  if (!resolved.configured || !resolved.apiKey) {
+    throw new Error(`model_provider_not_configured:${provider}`);
+  }
+  env.ROUNDTABLE_CCR_PROVIDER = provider;
+  env.ROUNDTABLE_CCR_API_KEY = resolved.apiKey;
+  env.ROUNDTABLE_CCR_BASE_URL = resolved.baseUrl;
+  env.ROUNDTABLE_CCR_MODEL = resolved.model;
+  env.LLM_API_KEY = resolved.apiKey;
+  env.LLM_BASE_URL = resolved.baseUrl;
+  env.LLM_MODEL = resolved.model;
+  env.OPENAI_API_KEY = resolved.apiKey;
+  env.OPENAI_BASE_URL = resolved.baseUrl;
+  env.OPENAI_MODEL = resolved.model;
+}
+
+async function prepareClaudeCodeRouterConfig(
+  input: RuntimeExecutionInput,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  const config = input.config;
+  if (!config?.modelProvider) return;
+  const providerName = `roundtable-${config.modelProvider}`;
+  const model = env.ROUNDTABLE_CCR_MODEL || env.LLM_MODEL || env.OPENAI_MODEL;
+  if (!model) throw new Error(`model_provider_missing_model:${config.modelProvider}`);
+
+  const home = roundtableCcrHome(input.workspace, input.conversationId);
+  const configDir = join(home, '.claude-code-router');
+  const port = ccrPortForConversation(input.conversationId);
+  env.HOME = home;
+  if (process.platform === 'win32') env.USERPROFILE = home;
+
+  await mkdir(configDir, { recursive: true });
+  await writeFile(join(configDir, 'config.json'), `${JSON.stringify({
+    LOG: true,
+    NON_INTERACTIVE_MODE: true,
+    API_TIMEOUT_MS: 86_400_000,
+    PORT: port,
+    Providers: [{
+      name: providerName,
+      api_base_url: chatCompletionsUrl(env.ROUNDTABLE_CCR_BASE_URL || env.LLM_BASE_URL || env.OPENAI_BASE_URL || ''),
+      api_key: '$ROUNDTABLE_CCR_API_KEY',
+      models: [model],
+    }],
+    Router: {
+      default: `${providerName},${model}`,
+      background: `${providerName},${model}`,
+      think: `${providerName},${model}`,
+      longContext: `${providerName},${model}`,
+    },
+  }, null, 2)}\n`, 'utf8');
+}
+
+function roundtableCcrHome(workspace: string, conversationId: string): string {
+  const base = resolve(workspace, '.roundtable', 'ccr-home');
+  return join(base, conversationId.replace(/[^a-zA-Z0-9_-]+/g, '_'));
+}
+
+function ccrPortForConversation(conversationId: string): number {
+  let hash = 0;
+  for (const char of conversationId) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return 34_560 + (hash % 10_000);
+}
+
+function chatCompletionsUrl(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/$/, '');
+  if (trimmed.endsWith('/chat/completions')) return trimmed;
+  return `${trimmed}/chat/completions`;
 }
 
 function providerQualifiedOpenCodeModel(model: string, env: NodeJS.ProcessEnv): string {
@@ -315,7 +408,7 @@ type RuntimeParser = {
 type EmitRuntimeEvent = (event: AgentEvent, transcript?: RuntimeTranscriptEntry | undefined) => Promise<void>;
 
 function parserForRuntime(runtime: AgentRuntimeKind): RuntimeParser {
-  if (runtime === 'claude-code') return new JsonLineParser(handleClaudeEvent);
+  if (runtime === 'claude-code' || runtime === 'claude-code-router') return new JsonLineParser(handleClaudeEvent);
   if (runtime === 'codex') return new JsonLineParser(handleCodexEvent);
   if (runtime === 'opencode') return new JsonObjectParser(handleOpenCodeEvent);
   return new PlainParser();

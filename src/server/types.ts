@@ -106,6 +106,7 @@ export type AgentRuntimeKind =
   | 'local-dispatch'
   | 'custom-cli'
   | 'claude-code'
+  | 'claude-code-router'
   | 'codex'
   | 'opencode';
 
@@ -116,6 +117,7 @@ export type AgentRuntimeConfig = {
   args: string[];
   env: Record<string, string>;
   model: string | null;
+  modelProvider: ModelProviderKind | null;
   updatedAt: string;
 };
 
@@ -125,6 +127,7 @@ export type AgentRuntimeDefaultConfig = {
   args: string[];
   env: Record<string, string>;
   model: string | null;
+  modelProvider: ModelProviderKind | null;
   updatedAt: string;
 };
 

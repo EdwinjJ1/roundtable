@@ -9,6 +9,7 @@ const BodySchema = z.object({
   args: z.array(z.string()).optional(),
   env: z.record(z.string()).optional(),
   model: z.string().nullable().optional(),
+  modelProvider: z.string().nullable().optional(),
 });
 
 export async function POST(req: Request) {
