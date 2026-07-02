@@ -10,6 +10,7 @@
    them so the artifact is the clean answer, and surface the reasoning length via
    the returned usage for observability.
    ============================================================================ */
+import { isModelProviderConfigured, resolveModelProvider } from '../settings-actions.js';
 
 export type MiniMaxMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
@@ -53,12 +54,16 @@ export function isMiniMaxAvailable(): boolean {
   return Boolean(process.env.MINIMAX_API_KEY && process.env.MINIMAX_API_KEY.trim());
 }
 
-function baseUrl(): string {
-  return (process.env.MINIMAX_BASE_URL || 'https://api.minimaxi.com/v1').replace(/\/$/, '');
+export function isMiniMaxConfigured(): Promise<boolean> {
+  return isModelProviderConfigured('minimax');
 }
 
 export function miniMaxModel(): string {
   return process.env.MINIMAX_MODEL || 'MiniMax-M3';
+}
+
+export async function resolvedMiniMaxModel(): Promise<string> {
+  return (await resolveModelProvider('minimax')).model || miniMaxModel();
 }
 
 /** Remove <think>…</think> reasoning blocks; return [clean, reasoning]. */
@@ -80,7 +85,8 @@ export function stripThink(content: string): [string, string | undefined] {
  * key is configured, MiniMaxRequestError on a non-2xx / API-level error.
  */
 export async function runOnMiniMax(input: MiniMaxRunInput): Promise<MiniMaxRunOutput> {
-  if (!isMiniMaxAvailable()) {
+  const config = await resolveModelProvider('minimax');
+  if (!config.configured || !config.apiKey) {
     throw new MiniMaxUnavailableError('MINIMAX_API_KEY is not set');
   }
 
@@ -88,14 +94,14 @@ export async function runOnMiniMax(input: MiniMaxRunInput): Promise<MiniMaxRunOu
   const timer = setTimeout(() => controller.abort(), input.timeoutMs ?? 120_000);
   let response: Response;
   try {
-    response = await fetch(`${baseUrl()}/chat/completions`, {
+    response = await fetch(`${config.baseUrl.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.MINIMAX_API_KEY}`,
+        Authorization: `Bearer ${config.apiKey}`,
       },
       body: JSON.stringify({
-        model: miniMaxModel(),
+        model: config.model,
         messages: input.messages,
         // Omit max_tokens unless explicitly configured: the provider's own
         // ceiling is usually higher than any hardcoded default, and truncation

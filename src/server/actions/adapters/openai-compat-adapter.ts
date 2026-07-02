@@ -17,6 +17,7 @@
    the standard `content` field and keep chain-of-thought in `reasoning_content`;
    we read `content` and surface reasoning length for observability only.
    ============================================================================ */
+import { isModelProviderConfigured, resolveModelProvider } from '../settings-actions.js';
 
 export type OpenAICompatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
@@ -62,12 +63,16 @@ export function isOpenAICompatAvailable(): boolean {
   return Boolean(apiKey() && process.env.ROUNDTABLE_OPENAI_BASE_URL && process.env.ROUNDTABLE_OPENAI_MODEL);
 }
 
-function baseUrl(): string {
-  return (process.env.ROUNDTABLE_OPENAI_BASE_URL || '').replace(/\/$/, '');
+export function isOpenAICompatConfigured(): Promise<boolean> {
+  return isModelProviderConfigured('openai-compatible');
 }
 
 export function openAICompatModel(): string {
   return process.env.ROUNDTABLE_OPENAI_MODEL || 'unknown-model';
+}
+
+export async function resolvedOpenAICompatModel(): Promise<string> {
+  return (await resolveModelProvider('openai-compatible')).model || openAICompatModel();
 }
 
 /**
@@ -76,7 +81,8 @@ export function openAICompatModel(): string {
  * on a non-2xx / API-level error.
  */
 export async function runOnOpenAICompat(input: OpenAICompatRunInput): Promise<OpenAICompatRunOutput> {
-  if (!isOpenAICompatAvailable()) {
+  const config = await resolveModelProvider('openai-compatible');
+  if (!config.configured || !config.apiKey) {
     throw new OpenAICompatUnavailableError(
       'ROUNDTABLE_OPENAI_BASE_URL / _MODEL / _API_KEY are not all set',
     );
@@ -86,14 +92,14 @@ export async function runOnOpenAICompat(input: OpenAICompatRunInput): Promise<Op
   const timer = setTimeout(() => controller.abort(), input.timeoutMs ?? 120_000);
   let response: Response;
   try {
-    response = await fetch(`${baseUrl()}/chat/completions`, {
+    response = await fetch(`${config.baseUrl.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey()}`,
+        Authorization: `Bearer ${config.apiKey}`,
       },
       body: JSON.stringify({
-        model: openAICompatModel(),
+        model: config.model,
         messages: input.messages,
         // Omit max_tokens unless explicitly configured: the provider's own
         // ceiling is usually higher than any hardcoded default, and truncation

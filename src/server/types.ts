@@ -102,6 +102,77 @@ export type WorkflowTemplate = {
 
 export type AgentRole = 'planner' | 'pm' | 'architect' | 'implementer' | 'reviewer' | 'fixer';
 
+export type AgentRuntimeKind =
+  | 'local-dispatch'
+  | 'custom-cli'
+  | 'claude-code'
+  | 'codex'
+  | 'opencode';
+
+export type AgentRuntimeConfig = {
+  agentId: string;
+  runtime: AgentRuntimeKind;
+  command: string | null;
+  args: string[];
+  env: Record<string, string>;
+  model: string | null;
+  updatedAt: string;
+};
+
+export type AgentRuntimeDefaultConfig = {
+  runtime: AgentRuntimeKind;
+  command: string | null;
+  args: string[];
+  env: Record<string, string>;
+  model: string | null;
+  updatedAt: string;
+};
+
+export type AgentRuntimeConversationStatus = 'running' | 'completed' | 'failed' | 'stopped';
+
+export type AgentRuntimeConversation = {
+  id: string;
+  agentId: string;
+  role: AgentRole;
+  runtime: AgentRuntimeKind;
+  title: string;
+  turnId: string | null;
+  taskId: string | null;
+  workspacePath: string;
+  cwd: string;
+  command: string;
+  pid: number | null;
+  status: AgentRuntimeConversationStatus;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+  events: AgentEvent[];
+  transcript: Array<{
+    at: string;
+    kind: 'status' | 'thinking' | 'response' | 'error';
+    content: string;
+  }>;
+  error: string | null;
+};
+
+export type ModelProviderKind = 'minimax' | 'openai-compatible';
+
+export type ModelProviderConfig = {
+  provider: ModelProviderKind;
+  enabled: boolean;
+  label: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string | null;
+  updatedAt: string;
+};
+
+export type RoundtableSettings = {
+  defaultAgentAdapter: string | null;
+  modelProviders: ModelProviderConfig[];
+  updatedAt: string;
+};
+
 export type AgentCard = {
   id: string;
   name: string;

@@ -5,11 +5,15 @@ import pg from 'pg';
 import type { Pool as PgPool, PoolClient, PoolConfig } from 'pg';
 import type {
   Artifact,
+  AgentRuntimeConfig,
+  AgentRuntimeConversation,
+  AgentRuntimeDefaultConfig,
   Chat,
   Handoff,
   LocalTurn,
   Message,
   Mission,
+  RoundtableSettings,
   UserProfile,
   Workbench,
   WorkbenchPin,
@@ -27,6 +31,10 @@ export type RoundtableData = {
   workbenchPins: WorkbenchPin[];
   turns: LocalTurn[];
   missions: Mission[];
+  agentRuntimeConfigs: AgentRuntimeConfig[];
+  agentRuntimeDefaults: AgentRuntimeDefaultConfig[];
+  agentRuntimeConversations: AgentRuntimeConversation[];
+  settings: RoundtableSettings;
 };
 
 const { Pool } = pg;
@@ -202,6 +210,10 @@ function emptyData(): RoundtableData {
     workbenchPins: [],
     turns: [],
     missions: [],
+    agentRuntimeConfigs: [],
+    agentRuntimeDefaults: [],
+    agentRuntimeConversations: [],
+    settings: emptySettings(),
   };
 }
 
@@ -218,6 +230,27 @@ function normalizeData(raw: Partial<RoundtableData>): RoundtableData {
     workbenchPins: Array.isArray(raw.workbenchPins) ? raw.workbenchPins : [],
     turns: Array.isArray(raw.turns) ? raw.turns : [],
     missions: Array.isArray(raw.missions) ? raw.missions : [],
+    agentRuntimeConfigs: Array.isArray(raw.agentRuntimeConfigs) ? raw.agentRuntimeConfigs : [],
+    agentRuntimeDefaults: Array.isArray(raw.agentRuntimeDefaults) ? raw.agentRuntimeDefaults : [],
+    agentRuntimeConversations: Array.isArray(raw.agentRuntimeConversations) ? raw.agentRuntimeConversations : [],
+    settings: normalizeSettings(raw.settings),
+  };
+}
+
+function emptySettings(): RoundtableSettings {
+  return {
+    defaultAgentAdapter: null,
+    modelProviders: [],
+    updatedAt: nowIso(),
+  };
+}
+
+function normalizeSettings(raw: Partial<RoundtableSettings> | undefined): RoundtableSettings {
+  if (!raw || typeof raw !== 'object') return emptySettings();
+  return {
+    defaultAgentAdapter: typeof raw.defaultAgentAdapter === 'string' ? raw.defaultAgentAdapter : null,
+    modelProviders: Array.isArray(raw.modelProviders) ? raw.modelProviders : [],
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : nowIso(),
   };
 }
 
