@@ -5,13 +5,15 @@ import { updateTurn } from './turn-store.js';
 
 export function intakeFromMessage(message: string): Intake {
   const lower = message.toLowerCase();
-  const intentType = lower.includes('review')
-    ? 'review'
-    : lower.includes('fix') || lower.includes('bug')
-      ? 'fix'
-      : lower.includes('research')
-        ? 'research'
-        : 'build';
+  const intentType = isQuestionMessage(message)
+    ? 'question'
+    : lower.includes('review')
+      ? 'review'
+      : lower.includes('fix') || lower.includes('bug')
+        ? 'fix'
+        : lower.includes('research')
+          ? 'research'
+          : 'build';
   return {
     intentType,
     summary: message.slice(0, 220),
@@ -20,7 +22,27 @@ export function intakeFromMessage(message: string): Intake {
   };
 }
 
-export function planFromMessage(message: string, workingStyle: WorkingStyleSnapshot = emptyWorkingStyle()): Plan {
+// A question gets an ANSWER, not a build pipeline: no clarify gate, no
+// implementer/reviewer chain, no previewable page. Conservative on purpose —
+// any build verb keeps the message on the build path, because "帮我做个网站吗?"
+// is a request, not a question.
+export function isQuestionMessage(message: string): boolean {
+  const trimmed = messageWithoutMentions(message).trim() || message.trim();
+  const interrogative = /[?？]\s*$/.test(trimmed)
+    || /[吗呢]\s*[?？]?\s*$/.test(trimmed)
+    || /^(why|how|what|when|where|which|who|whose|is|are|was|were|does|do|did|can|could|should|would|explain|tell me)\b/i.test(trimmed)
+    || /\b(why|how|what)\b/i.test(trimmed)
+    || /(为什么|为啥|怎么|怎样|如何|什么|哪个|哪些|是不是|能不能|可不可以|有没有|解释一下|讲讲|说说)/.test(trimmed);
+  const buildVerb = /\b(build|create|make|implement|add|write|code|develop|generate|refactor|fix|repair|deploy|update|remove|delete|rename|install|set\s?up)\b/i.test(trimmed)
+    || /(做|建|写|开发|生成|搭|实现|修复|修改|修好|改成|改进|添加|加上|部署|创建|删除|重构|安装|帮我把)/.test(trimmed);
+  return interrogative && !buildVerb;
+}
+
+export function planFromMessage(
+  message: string,
+  workingStyle: WorkingStyleSnapshot = emptyWorkingStyle(),
+  intentType?: Intake['intentType'],
+): Plan {
   const goal = messageWithoutMentions(message) || message;
   const base = compactTitle(goal);
   const hasExplicitMention = mentionTokens(message).length > 0;
@@ -28,6 +50,15 @@ export function planFromMessage(message: string, workingStyle: WorkingStyleSnaps
   const explicitPlanningOnly = targets.length === 1 && targets[0]?.role === 'planner';
   const startsWithPlanning = targets.some((agent) => agent.role === 'planner') || targets.length === AGENT_ROSTER.length;
   const tasks: PlanTask[] = [];
+
+  // A question needs exactly one agent reading the workspace and answering —
+  // not a plan→build→review pipeline. Explicit @mentions still win.
+  if (intentType === 'question' && !hasExplicitMention) {
+    return {
+      summary: `Answer: ${base}`,
+      tasks: [taskForAgent('task_answer', `Answer: ${base}`, planner(), goal, [], false, 'answer', workingStyle)],
+    };
+  }
 
   if (!hasExplicitMention) {
     const implementer = implementerForMessage(message);

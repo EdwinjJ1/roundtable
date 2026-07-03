@@ -104,12 +104,13 @@ describe('Mission P0 migration', () => {
     expect(result.dispatchStatus).toBe('completed');
     expect(result.mission?.status).toBe('completed');
     expect(result.mission?.finalDelivery.status).toBe('ready');
-    expect(result.mission?.finalDelivery.reportArtifactId).toBe(`final_report_${turn.id}`);
+    // Report artifacts are chat-scoped so follow-up turns replace them in place.
+    expect(result.mission?.finalDelivery.reportArtifactId).toBe(`final_report_${chat.id}`);
     expect(result.mission?.finalDelivery.confidence).toBe('pass');
     expect(result.mission?.finalDelivery.testsObserved).toBe(true);
-    expect(result.artifacts.find((artifact) => artifact.id === `final_report_${turn.id}`)?.preview)
+    expect(result.artifacts.find((artifact) => artifact.id === `final_report_${chat.id}`)?.preview)
       .toContain('Final Delivery Report');
-    expect(JSON.parse(result.artifacts.find((artifact) => artifact.id === `review_summary_${turn.id}`)?.preview ?? '{}')?.confidence)
+    expect(JSON.parse(result.artifacts.find((artifact) => artifact.id === `review_summary_${chat.id}`)?.preview ?? '{}')?.confidence)
       .toBe('pass');
     expect(result.workflowRun?.stageStates.plan?.status).toBe('done');
     expect(result.workflowRun?.stageStates.build?.status).toBe('done');

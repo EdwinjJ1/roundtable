@@ -296,7 +296,7 @@ export type WorkbenchPin = {
 };
 
 export type Intake = {
-  intentType: 'build' | 'review' | 'research' | 'fix';
+  intentType: 'build' | 'review' | 'research' | 'fix' | 'question';
   summary: string;
   clarity: 'low' | 'medium' | 'high';
   risk: 'low' | 'medium' | 'high';

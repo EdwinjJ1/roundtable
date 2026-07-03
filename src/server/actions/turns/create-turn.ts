@@ -43,7 +43,11 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
   // Clarify gate: the planner judges whether the request is clear enough to plan.
   // If not, pause here with multiple-choice questions and DON'T build a plan yet —
   // the user answers, then answerClarification() resumes with the enriched goal.
-  const assessment = await assessClarity(message);
+  // A question is answered as-is: interrogating the user about "scope and tech
+  // stack" before answering their question is the build pipeline leaking.
+  const assessment = intakeFromMessage(message).intentType === 'question'
+    ? { clarity: 1, needsClarification: false, questions: [] }
+    : await assessClarity(message);
   const now = nowIso();
   if (assessment.needsClarification) {
     const turn = buildTurn({
@@ -138,8 +142,14 @@ function buildTurn(opts: {
     : selectWorkflowTemplate(message);
   const missionId = opts.missionId ?? id('mission');
   const intake = intakeFromMessage(message);
-  const plan = parked ? { summary: `Awaiting clarification: ${message.slice(0, 80)}`, tasks: [] } : planFromMessage(message, workingStyle);
-  const artifacts = parked ? [] : baseArtifacts(turnId, chatId ?? `local-${turnId}`, message, intake, plan, workingStyle);
+  const plan = parked
+    ? { summary: `Awaiting clarification: ${message.slice(0, 80)}`, tasks: [] }
+    : planFromMessage(message, workingStyle, intake.intentType);
+  // Question turns produce an answer, not a mission dossier: intake/plan
+  // artifacts would be noise next to it.
+  const artifacts = parked || intake.intentType === 'question'
+    ? []
+    : baseArtifacts(turnId, chatId ?? `local-${turnId}`, message, intake, plan, workingStyle);
   const mission = buildMissionSnapshot({
     ownerId,
     chatId,
@@ -199,7 +209,9 @@ function buildTurn(opts: {
     model: 'agent-chain-v1',
     pmMessage: parked
       ? 'I need a couple of details before I plan this.'
-      : `Plan ready — ${plan.tasks.length} agent step${plan.tasks.length === 1 ? '' : 's'}. Review and start when you're ready.`,
+      : intake.intentType === 'question'
+        ? 'This reads as a question — one agent will answer it directly. Start when ready.'
+        : `Plan ready — ${plan.tasks.length} agent step${plan.tasks.length === 1 ? '' : 's'}. Review and start when you're ready.`,
     needsClarification: parked,
     clarifyQuestions: opts.clarifyQuestions ?? [],
     clarifyAnswers: opts.clarifyAnswers ?? [],

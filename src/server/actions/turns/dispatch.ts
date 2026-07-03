@@ -1,4 +1,4 @@
-import { mutateData, nowIso } from '../../store.js';
+import { mutateData, nowIso, readData } from '../../store.js';
 import type {
   Actor,
   AgentEvent,
@@ -22,7 +22,7 @@ import {
 import { hasBlockingFinding, safetyEnabled, scanArtifact } from '../safety.js';
 import { runScheduler, type ScheduledTask, type TaskResult } from '../scheduler.js';
 import { resolveDefaultAgentAdapter } from '../settings-actions.js';
-import { artifactFromRun, finalReportArtifact, reviewerSummaryArtifact, upsertArtifacts } from './artifacts.js';
+import { artifactsFromRun, finalReportArtifact, reviewerSummaryArtifact, upsertArtifacts } from './artifacts.js';
 import { ActionError } from './errors.js';
 import {
   makeFixerTask,
@@ -149,9 +149,34 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   }), input);
 
   // Per-task side data the scheduler's lean TaskResult doesn't carry: the agent
-  // event stream and the produced artifact, keyed by task id for later assembly.
+  // event stream and the produced artifacts, keyed by task id for later
+  // assembly. artifactByTask holds each task's PRIMARY artifact (the built page
+  // when one exists) for handoff context and the repair loop; allArtifactsByTask
+  // holds everything the task produced, including real workspace files.
   const eventsByTask = new Map<string, AgentEvent[]>();
   const artifactByTask = new Map<string, Artifact>();
+  const allArtifactsByTask = new Map<string, Artifact[]>();
+
+  // Work completed by EARLIER turns in this chat: handed to every agent so a
+  // follow-up request is treated as an increment on the existing work, not a
+  // fresh build. (The files themselves are still in the shared workspace.)
+  const priorChatArtifacts = turn.localChatId
+    ? (await readData()).artifacts
+        .filter((artifact) => artifact.chatId === turn.localChatId)
+        .filter((artifact) => !turn.artifacts.some((own) => own.id === artifact.id))
+        .slice(-12)
+    : [];
+  const continuationContext = priorChatArtifacts.length > 0
+    ? [
+        '# Follow-up in an ongoing mission',
+        '',
+        'Earlier turns in this chat already produced work; the files are in the workspace.',
+        'Treat this request as an INCREMENT: revise or extend the existing work instead of recreating it.',
+        '',
+        'Prior artifacts:',
+        ...priorChatArtifacts.map((artifact) => `- ${artifact.title} (${artifact.kind}, v${artifact.version})`),
+      ].join('\n')
+    : '';
 
   // Title/brief patches computed when the planner completes. The scheduler
   // snapshots the task graph BEFORE the planner runs, so without this the model
@@ -167,6 +192,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     const effectiveTask = patch ? { ...task, ...patch } : task;
     const depEntries = Object.entries(depOutputs);
     const contextArtifacts = [
+      ...priorChatArtifacts,
       ...turn.artifacts,
       ...depEntries
         .map(([depId]) => artifactByTask.get(depId))
@@ -192,6 +218,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
       formatWorkingStyleForPrompt(turn.workingStyle)
         ? `# User working style\n\n${formatWorkingStyleForPrompt(turn.workingStyle)}`
         : '',
+      continuationContext,
       formatHandoffContext(handoffCard, depOutputs),
     ].filter(Boolean).join('\n\n---\n\n');
 
@@ -220,7 +247,9 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     }
 
     eventsByTask.set(task.id, fallbackNote ? [fallbackNote, ...result.events] : result.events);
-    artifactByTask.set(task.id, artifactFromRun(turn, effectiveTask, result));
+    const produced = artifactsFromRun(turn, effectiveTask, result);
+    artifactByTask.set(task.id, produced.primary);
+    allArtifactsByTask.set(task.id, produced.all);
 
     if (!result.ok) {
       return { ok: false, error: { message: result.error ?? 'agent_task_failed' } };
@@ -248,11 +277,20 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
 
     // A fixer that produced a complete deliverable repairs the artifact it was
     // derived for: update it in place (bumped version) so the preview shows the
-    // FIXED page, not the flawed original the reviewer rejected.
+    // FIXED page, not the flawed original the reviewer rejected. (CLI-backed
+    // fixers edit the real file instead; their workspace scan re-captures it.)
     if (task.repairTargetTaskId) {
       const target = artifactByTask.get(task.repairTargetTaskId);
       const repaired = target ? repairedTargetArtifact(target, result.text) : null;
-      if (repaired) artifactByTask.set(task.repairTargetTaskId, repaired);
+      if (repaired) {
+        artifactByTask.set(task.repairTargetTaskId, repaired);
+        allArtifactsByTask.set(
+          task.repairTargetTaskId,
+          (allArtifactsByTask.get(task.repairTargetTaskId) ?? [repaired]).map(
+            (artifact) => (artifact.id === repaired.id ? repaired : artifact),
+          ),
+        );
+      }
     }
 
     // Review gate: a reviewer that reports blocking (Critical/High) issues should
@@ -364,12 +402,13 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     ...(record.fixRound !== undefined ? { fixRound: record.fixRound } : {}),
   }));
 
-  const runArtifacts: Artifact[] = [
-    ...turn.artifacts,
-    ...run.tasks
-      .map((task) => artifactByTask.get(task.id))
-      .filter((artifact): artifact is Artifact => artifact !== undefined),
-  ];
+  // Fold every task's artifacts together with replace-by-identity semantics:
+  // two tasks (or a fixer round) touching the same file yield ONE artifact with
+  // a bumped version, not duplicates.
+  const runArtifacts: Artifact[] = [...turn.artifacts];
+  for (const task of run.tasks) {
+    upsertArtifacts(runArtifacts, allArtifactsByTask.get(task.id) ?? []);
+  }
 
   // A failed task is "repaired" if a fixer in its lineage completed. Walk the
   // producedFor chain from every completed fixer back to the originally failed
@@ -399,7 +438,10 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   const failed = run.tasks.some(
     (task) => (task.status === 'failed' || task.status === 'blocked') && !repaired.has(task.id),
   );
-  const artifacts: Artifact[] = failed
+  // A question turn delivers an answer, not a build: delivery-report artifacts
+  // (review summary, final report) would be noise on top of it.
+  const isQuestionTurn = turn.intake.intentType === 'question';
+  const artifacts: Artifact[] = failed || isQuestionTurn
     ? runArtifacts
     : [...runArtifacts, reviewerSummaryArtifact(turn, runArtifacts, records), finalReportArtifact(turn, runArtifacts, records)];
   // Persist any fixer tasks the scheduler derived at runtime back into the plan,

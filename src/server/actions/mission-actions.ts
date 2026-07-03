@@ -881,8 +881,10 @@ function updateDecisions(
 
 function finalDeliveryForTurn(turn: LocalTurn): MissionFinalDelivery {
   if (turn.dispatchStatus !== 'completed') return initialFinalDelivery();
-  const reportArtifact = turn.artifacts.find((artifact) => artifact.id === `final_report_${turn.id}`);
-  const summaryArtifact = turn.artifacts.find((artifact) => artifact.id === `review_summary_${turn.id}`);
+  // Report artifacts are scoped to the chat when one exists (so follow-up turns
+  // replace them) and to the turn otherwise — match by prefix, not exact id.
+  const reportArtifact = turn.artifacts.find((artifact) => artifact.id.startsWith('final_report_'));
+  const summaryArtifact = turn.artifacts.find((artifact) => artifact.id.startsWith('review_summary_'));
   const summary = parseReviewSummary(summaryArtifact?.preview);
   const reviewArtifact = turn.artifacts.find((artifact) => artifact.ownerAgentId === 'vera' || artifact.ownerAgentId === 'reviewer');
   const reportText = reportArtifact?.preview ?? '';

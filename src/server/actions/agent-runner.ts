@@ -14,6 +14,7 @@ import {
   finishRuntimeConversation,
   runtimeConversationCallbacks,
 } from './runtime-actions.js';
+import { collectChangedWorkspaceFiles, type ChangedWorkspaceFile } from './turns/workspace-scan.js';
 
 export type AgentRunResult = {
   text: string;
@@ -22,6 +23,10 @@ export type AgentRunResult = {
   events: AgentEvent[];
   ok: boolean;
   error: string | null;
+  // Real files the agent produced or edited in the workspace during this run
+  // (CLI-backed agents only). These are the deliverables; `text` is the
+  // agent's narration and must never be presented as the product.
+  files?: ChangedWorkspaceFile[] | undefined;
 };
 
 export async function runAgentTask(input: {
@@ -114,7 +119,11 @@ async function runAgentCliTask(input: {
   runtimeEnv?: NodeJS.ProcessEnv | undefined;
 }): Promise<AgentRunResult> {
   const agent = agentForTask(input.task);
-  const path = pathForTask(input.task);
+  // A CLI-backed agent edits real files in the workspace; its stdout is a
+  // transcript, not the deliverable. The transcript is therefore stored as a
+  // Markdown log — NEVER as .html — and the actual deliverables are collected
+  // from the workspace after the run.
+  const path = transcriptPathForTask(input.task);
   const prompt = agentPrompt(agent, input);
   const data = await readData();
   const runtimeEnv = input.runtimeEnv ?? process.env;
@@ -147,6 +156,9 @@ async function runAgentCliTask(input: {
   ];
 
   try {
+    // Small backdate so a file the CLI writes in the same tick as the spawn is
+    // never missed by the post-run mtime scan.
+    const startedMs = Date.now() - 2_000;
     const result = await executeCliRuntime({
       conversationId: conversation.id,
       runtime,
@@ -162,14 +174,18 @@ async function runAgentCliTask(input: {
     const text = ok
       ? result.text
       : `# ${input.task.title}\n\n${runtime} did not produce a usable result.\n\n${result.text}`;
-    await writeWorkspaceFile(input.workspace, path, text);
+    await writeWorkspaceFile(input.workspace, path, transcriptMarkdown(input.task, agent.displayName, runtime, text));
+    const scan = ok
+      ? await collectChangedWorkspaceFiles(input.workspace, startedMs)
+      : { files: [], skipped: [] };
     await finishRuntimeConversation(conversation.id, ok ? 'completed' : 'failed', result.error);
     return {
       text,
       path,
-      kind: kindForPath(path),
+      kind: 'markdown',
       ok,
       error: result.error,
+      files: scan.files,
       events: [
         ...started,
         {
@@ -185,8 +201,21 @@ async function runAgentCliTask(input: {
           ...(ok ? {} : { isError: true }),
         },
         ...result.events,
-        { type: 'file_change', path, kind: 'create', diff: `created ${path}` },
-        { type: 'text_delta', delta: ok ? `${agent.displayName} completed via ${runtime}; transcript saved at ${path}.` : `${runtime} failed; captured diagnostic artifact at ${path}.` },
+        ...scan.files.map((file): AgentEvent => (
+          { type: 'file_change', path: file.path, kind: 'edit', diff: `produced ${file.path}` }
+        )),
+        ...(scan.skipped.length > 0
+          ? [{
+              type: 'text_delta',
+              delta: `${scan.skipped.length} changed file(s) not captured as artifacts (binary, oversized, or over the cap): ${scan.skipped.slice(0, 5).join(', ')}${scan.skipped.length > 5 ? ', …' : ''}`,
+            } as AgentEvent]
+          : []),
+        {
+          type: 'text_delta',
+          delta: ok
+            ? `${agent.displayName} completed via ${runtime}; ${scan.files.length} deliverable file(s) captured, transcript at ${path}.`
+            : `${runtime} failed; captured diagnostic log at ${path}.`,
+        },
         ok ? { type: 'done', finishReason: 'completed' } : { type: 'error', message: result.error ?? 'runtime_failed', recoverable: true },
       ],
     };
@@ -420,15 +449,16 @@ function pathForTask(task: PlanTask): string {
   // SAME path as the original, so the fix replaces the flawed page instead of
   // landing in a markdown file nobody previews.
   if (task.repairTargetPath) return task.repairTargetPath;
-  const slug = task.title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 64) || task.id;
+  const slug = taskSlug(task);
   const agent = agentForTask(task);
+  // Answering a question produces notes, never a page — regardless of whether
+  // the question mentions a website.
+  if (task.stageId === 'answer') return `.roundtable/runs/docs/${slug}.md`;
   // A web/page build should produce a previewable HTML artifact, not a Markdown
   // doc — otherwise the model is never asked for a real page and the UI can't
   // render a preview. Detect intent from the task's text (title + brief).
+  // Applies to chat-only model adapters, whose response text IS the deliverable;
+  // CLI-backed agents write real files instead (see transcriptPathForTask).
   if (agent.role === 'implementer') {
     const ext = wantsWebPage(`${task.title} ${task.brief}`) ? 'html' : 'md';
     return `.roundtable/runs/work/${slug}.${ext}`;
@@ -436,6 +466,31 @@ function pathForTask(task: PlanTask): string {
   if (agent.role === 'reviewer') return `.roundtable/runs/review/${slug}.md`;
   if (agent.role === 'fixer') return `.roundtable/runs/fixes/${slug}.md`;
   return `.roundtable/runs/docs/${slug}.md`;
+}
+
+// Where a CLI-backed agent's run transcript is stored. Always Markdown: the
+// transcript is narration about the work, and storing it as .html is what used
+// to make the UI "preview" a wall of prose instead of the built page.
+export function transcriptPathForTask(task: PlanTask): string {
+  return `.roundtable/runs/logs/${taskSlug(task)}.md`;
+}
+
+function taskSlug(task: PlanTask): string {
+  return task.title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 64) || task.id;
+}
+
+function transcriptMarkdown(task: PlanTask, agentName: string, runtime: string, text: string): string {
+  return [
+    `# Run log · ${task.title}`,
+    '',
+    `Agent: ${agentName} · Runtime: ${runtime}`,
+    '',
+    text,
+  ].join('\n');
 }
 
 // Does this build target a renderable web page? Covers EN + 中文 vocabulary.
@@ -616,14 +671,17 @@ function commandArgs(prompt: string, agent: AgentProfile): string[] {
 }
 
 function agentPrompt(agent: AgentProfile, input: { task: PlanTask; message: string; handoffContext?: string | undefined }): string {
-  const roleInstruction = {
-    planner: 'Create the initial breakdown and routing. Do not implement unless the task explicitly asks only for planning.',
-    pm: 'Clarify product intent, constraints, acceptance criteria, and sequencing.',
-    architect: 'Design the technical approach, interfaces, risks, and dependency order.',
-    implementer: 'Modify the project files needed to complete your assigned slice.',
-    reviewer: 'Review the current project state and report concrete issues, risks, and missing tests.',
-    fixer: 'Apply focused fixes for known issues and summarize changed files.',
-  }[agent.role];
+  const roleInstruction = input.task.stageId === 'answer'
+    ? 'Answer the user\'s question directly, using the files in this workspace as reference. '
+      + 'Do NOT create, modify, or delete any files and do NOT produce a plan — reply with the answer itself in Markdown.'
+    : {
+        planner: 'Create the initial breakdown and routing. Do not implement unless the task explicitly asks only for planning.',
+        pm: 'Clarify product intent, constraints, acceptance criteria, and sequencing.',
+        architect: 'Design the technical approach, interfaces, risks, and dependency order.',
+        implementer: 'Modify the project files needed to complete your assigned slice.',
+        reviewer: 'Review the current project state and report concrete issues, risks, and missing tests.',
+        fixer: 'Apply focused fixes for known issues and summarize changed files.',
+      }[agent.role];
 
   return [
     'You are running inside Roundtable as one CLI-backed coding agent.',
@@ -651,7 +709,9 @@ function chatAgentPrompt(
   input: { task: PlanTask; message: string; handoffContext?: string | undefined },
 ): string {
   const isHtml = pathForTask(input.task).endsWith('.html');
-  const roleInstruction = {
+  const roleInstruction = input.task.stageId === 'answer'
+    ? 'Answer the user\'s question directly and concisely in Markdown. Do not produce a plan or a deliverable page.'
+    : {
     planner: 'Map the goal into a practical next-step plan. Keep it useful and concise.',
     pm: 'Clarify product intent, constraints, acceptance criteria, and sequencing.',
     architect: 'Describe a workable technical approach, key interfaces, risks, and tradeoffs.',

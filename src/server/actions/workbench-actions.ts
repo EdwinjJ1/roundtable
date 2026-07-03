@@ -37,14 +37,30 @@ export async function createWorkbench(actor: Actor, input: CreateWorkbenchInput)
 
 export function workspacePathForWorkbench(ownerId: string, workbenchId: string, requestedPath?: string | undefined): string {
   const candidate = requestedPath?.trim();
-  if (candidate && customWorkspacePathsAllowed()) return resolve(candidate);
+  if (candidate && customWorkspacePathsAllowed()) {
+    const resolved = resolve(candidate);
+    if (!isForbiddenWorkspace(resolved)) return resolved;
+  }
   return defaultWorkspacePath(ownerId, workbenchId);
 }
 
 export function storedWorkspacePath(workbench: Workbench): string {
   const resolved = resolve(workbench.workspacePath);
+  if (isForbiddenWorkspace(resolved)) return defaultWorkspacePath(workbench.ownerId, workbench.id);
   if (customWorkspacePathsAllowed() || isPathInside(workspaceRoot(), resolved)) return resolved;
   return defaultWorkspacePath(workbench.ownerId, workbench.id);
+}
+
+// Agents run inside the workspace with file-write access. If the workspace is
+// this app's own source tree (or a directory containing it), an agent asked to
+// "build a website" will happily write its pages INTO the product's src/ — that
+// actually happened. No configuration may point a workspace at the app root or
+// any ancestor of it. Dedicated subdirectories (e.g. .roundtable/workspaces/*)
+// remain fine.
+export function isForbiddenWorkspace(target: string): boolean {
+  const appRoot = process.cwd();
+  const rel = relative(resolve(target), appRoot);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 function defaultWorkspacePath(ownerId: string, workbenchId: string): string {
