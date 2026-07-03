@@ -773,7 +773,12 @@ function normalizeData(raw: Partial<RoundtableData>): RoundtableData {
     messages: Array.isArray(raw.messages) ? raw.messages : [],
     artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : [],
     handoffs: Array.isArray(raw.handoffs) ? raw.handoffs : [],
-    profiles: Array.isArray(raw.profiles) ? raw.profiles : [],
+    profiles: Array.isArray(raw.profiles)
+      ? raw.profiles.map((profile) => ({
+          ...profile,
+          displayName: profile.displayName ?? '',
+        }))
+      : [],
     userSkills: Array.isArray(raw.userSkills) ? raw.userSkills : [],
     workbenchPins: Array.isArray(raw.workbenchPins) ? raw.workbenchPins : [],
     turns: Array.isArray(raw.turns) ? raw.turns : [],

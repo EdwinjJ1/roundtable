@@ -71,6 +71,7 @@ const userProfileRouter = createTRPCRouter({
   get: protectedProcedure.query(({ ctx }) => getUserProfile(ctx.user)),
   update: protectedProcedure
     .input(z.object({
+      displayName: z.string().optional(),
       defaultBrief: z.string().optional(),
       defaultSkills: z.array(z.string()).optional(),
       notes: z.string().optional(),

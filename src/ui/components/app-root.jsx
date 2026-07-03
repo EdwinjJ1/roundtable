@@ -14,6 +14,7 @@ import { WorkflowView } from './workflow';
 import { Modal, NewTaskModal, NewWorkbenchModal, AddAgentModal } from './modals';
 import { TopBar, recommendWorkflow, Dock } from './stage-scene';
 import { Drawer, InspectorPanel } from './inspector';
+import { AccountSettings } from './account-settings';
 import { latestLiveTurn, buildLocalScene } from '../lib/live-scene';
 import { signOut, useSession } from 'next-auth/react';
 import { trpc } from '@/ui/lib/trpc';
@@ -458,6 +459,7 @@ function App() {
   // P3.2: live chats when signed in; fall back to fixtures for the logged-out demo.
   const { data: session, status: authStatus } = useSession();
   const authed = authStatus === 'authenticated';
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const handleSignIn = useCallback(() => {
     window.location.assign(`/signin?callbackUrl=${encodeURIComponent(window.location.href)}`);
   }, []);
@@ -976,7 +978,8 @@ function App() {
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <TopBar t={t} setTweak={setTweak} view={view} setView={setView}
         authStatus={authStatus} user={session?.user}
-        onSignIn={handleSignIn} onSignUp={handleSignUp} onSignOut={handleSignOut} />
+        onSignIn={handleSignIn} onSignUp={handleSignUp} onSignOut={handleSignOut}
+        onOpenSettings={() => setSettingsOpen(true)} />
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {railOpen && !compact && <ConversationRail workbench={railWorkbench} workbenches={railWorkbenches}
           tasks={tasks} agents={agents} activeId={authed ? activeChatId : activeLocalTaskId} onPick={authed ? pickChat : pickLocalTurn}
@@ -1091,6 +1094,10 @@ function App() {
 
       {drawerArt && <Drawer art={drawerArt} agents={agents} onClose={() => setDrawerArt(null)} />}
       {zoomWB && <WhiteboardZoom tasks={st.tasks} agents={agents} live={st.live} run={st.run} posted={st.planPosted} onClose={() => setZoomWB(false)} />}
+      <AccountSettings open={settingsOpen} onClose={() => setSettingsOpen(false)}
+        authStatus={authStatus} user={session?.user} workbench={activeWorkbench}
+        theme={t.theme} onThemeChange={(value) => setTweak('theme', value)}
+        onSignIn={handleSignIn} onSignOut={handleSignOut} />
       {breakoutOpen && <BreakoutModal data={breakoutData} agents={agents} onClose={() => setBreakoutOpen(false)}
         onBringBack={() => { setInspectorTab('notes'); setNotesOpen(true); }} />}
       {hubOpen && <BreakoutsHub agents={agents} memberIds={memberIds} autoRoom={st.breakout ? breakoutData : null}

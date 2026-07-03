@@ -196,24 +196,38 @@ function MiniSeg({ value, options, onChange }) {
 }
 
 /* ---- TopBar --------------------------------------------------------------- */
-function AccountControl({ authStatus, user, onSignIn, onSignUp, onSignOut }) {
+function AccountControl({ authStatus, user, onSignIn, onSignUp, onSignOut, onOpenSettings }) {
   const authed = authStatus === 'authenticated';
   const loading = authStatus === 'loading';
   const label = user?.email || user?.name || 'Account';
+  const [menuOpen, setMenuOpen] = useState(false);
 
   if (authed) {
     return (
-      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0,
-        padding: '4px 4px 4px 10px', borderRadius: 'var(--r-chip)', border: '1px solid var(--border)',
-        background: 'var(--surface-2)', color: 'var(--text-muted)' }}>
-        <Icon name="at" size={14} />
-        <span style={{ maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          fontSize: 12.5, fontWeight: 500 }}>{label}</span>
-        <button onClick={onSignOut} title="Sign out" style={{ display: 'inline-grid', placeItems: 'center',
-          width: 28, height: 26, borderRadius: 'calc(var(--r-sm) - 2px)', border: '1px solid var(--border)',
-          background: 'var(--surface)', color: 'var(--text-muted)', cursor: 'pointer' }}>
-          <Icon name="door" size={14} />
+      <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', minWidth: 0 }}>
+        <button onClick={() => setMenuOpen((value) => !value)} title="Account settings"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 7, minWidth: 0,
+            padding: '7px 10px', borderRadius: 'var(--r-chip)', border: '1px solid var(--border)',
+            background: 'var(--surface-2)', color: 'var(--text-muted)', cursor: 'pointer',
+            font: 'inherit', fontSize: 12.5, fontWeight: 600 }}>
+          <Icon name="at" size={14} />
+          <span style={{ maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+          <Icon name="chevdown" size={12} />
         </button>
+        {menuOpen && (
+          <div style={{ position: 'absolute', top: 'calc(100% + 8px)', right: 0, zIndex: 140,
+            width: 220, padding: 7, borderRadius: 'var(--r-card)', border: '1px solid var(--border)',
+            background: 'var(--surface)', boxShadow: 'var(--shadow-pop)', display: 'grid', gap: 4 }}>
+            <button onClick={() => { setMenuOpen(false); onOpenSettings?.(); }}
+              style={accountMenuItem}>
+              <Icon name="edit" size={14} /> Profile & settings
+            </button>
+            <button onClick={() => { setMenuOpen(false); onSignOut?.(); }}
+              style={accountMenuItem}>
+              <Icon name="door" size={14} /> Sign out
+            </button>
+          </div>
+        )}
       </div>
     );
   }
@@ -241,7 +255,24 @@ function AccountControl({ authStatus, user, onSignIn, onSignUp, onSignOut }) {
   );
 }
 
-function TopBar({ t, setTweak, view, setView, authStatus, user, onSignIn, onSignUp, onSignOut }) {
+const accountMenuItem = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '8px 9px',
+  borderRadius: 'var(--r-sm)',
+  border: 'none',
+  background: 'transparent',
+  color: 'var(--text)',
+  font: 'inherit',
+  fontSize: 12.5,
+  fontWeight: 700,
+  cursor: 'pointer',
+  textAlign: 'left',
+};
+
+function TopBar({ t, setTweak, view, setView, authStatus, user, onSignIn, onSignUp, onSignOut, onOpenSettings }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '0 18px', height: 54,
       borderBottom: '1px solid var(--border)', background: 'var(--surface)', flexShrink: 0 }}>
@@ -249,7 +280,7 @@ function TopBar({ t, setTweak, view, setView, authStatus, user, onSignIn, onSign
         { v: 'roundtable', label: 'Roundtable', icon: 'layers' },
         { v: 'workflow', label: 'Workflow', icon: 'sparkle' }]} />
       <div style={{ flex: 1 }} />
-      <AccountControl authStatus={authStatus} user={user} onSignIn={onSignIn} onSignUp={onSignUp} onSignOut={onSignOut} />
+      <AccountControl authStatus={authStatus} user={user} onSignIn={onSignIn} onSignUp={onSignUp} onSignOut={onSignOut} onOpenSettings={onOpenSettings} />
       <button onClick={() => setTweak('theme', t.theme === 'light' ? 'dark' : 'light')} title="Toggle theme"
         style={{ ...iconBtn, background: 'var(--surface-2)' }}>
         <Icon name={t.theme === 'light' ? 'moon' : 'sun'} size={16} />

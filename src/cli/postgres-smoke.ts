@@ -68,6 +68,7 @@ const handoff: Handoff = {
 };
 const profile: UserProfile = {
   userId: marker.id,
+  displayName: marker.name,
   defaultBrief: 'Smoke profile',
   defaultSkills: [],
   notes: 'Smoke profile notes',

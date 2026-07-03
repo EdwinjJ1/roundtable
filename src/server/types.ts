@@ -154,6 +154,7 @@ export type HandoffCardV2 = {
 
 export type UserProfile = {
   userId: string;
+  displayName: string;
   defaultBrief: string;
   defaultSkills: string[];
   notes: string;
