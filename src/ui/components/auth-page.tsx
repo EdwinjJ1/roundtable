@@ -47,7 +47,7 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
       window.localStorage.setItem('roundtable.pendingWorkbenchName', workspaceName.trim() || 'Product Squad');
     }
     setPending(true);
-    await signIn('google', { callbackUrl: target });
+    await signIn('google', { callbackUrl: authCallbackUrl(target) });
   };
 
   const submitDev = async (event: FormEvent<HTMLFormElement>) => {
@@ -57,7 +57,7 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
     const result = await signIn('dev', {
       email,
       name: isSignup ? name : undefined,
-      callbackUrl: target,
+      callbackUrl: authCallbackUrl(target),
       redirect: false,
     });
     setPending(false);
@@ -69,7 +69,7 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
     if (isSignup) {
       window.localStorage.setItem('roundtable.pendingWorkbenchName', workspaceName.trim() || 'Product Squad');
     }
-    router.push(result?.url || target);
+    router.push(routerTarget(result?.url || target));
   };
 
   const moveStage = (event: MouseEvent<HTMLElement>) => {
@@ -359,6 +359,29 @@ function GoogleMark() {
       <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.2-4 5.5l6.2 5.2C36.9 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z" />
     </svg>
   );
+}
+
+function authCallbackUrl(target: string): string {
+  if (typeof window === 'undefined') return target;
+  if (target.startsWith('/')) return `${window.location.origin}${target}`;
+  try {
+    const url = new URL(target);
+    return url.origin === window.location.origin ? url.href : `${window.location.origin}/`;
+  } catch {
+    return `${window.location.origin}/`;
+  }
+}
+
+function routerTarget(target: string): string {
+  if (target.startsWith('/')) return target;
+  if (typeof window === 'undefined') return '/';
+  try {
+    const url = new URL(target);
+    if (url.origin !== window.location.origin) return '/';
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return '/';
+  }
 }
 
 const linkStyle = {
