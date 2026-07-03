@@ -1,11 +1,10 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent, MouseEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { signIn } from 'next-auth/react';
-import { Icon } from './primitives';
+import { getProviders, signIn } from 'next-auth/react';
 
 type AuthMode = 'signin' | 'signup';
 
@@ -28,14 +27,30 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
   const [workspaceName, setWorkspaceName] = useState('Product Squad');
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
+  const [providers, setProviders] = useState<Record<string, { id: string; name: string }> | null>(null);
   const [pointer, setPointer] = useState({ x: 0, y: 0, active: false });
   const isSignup = mode === 'signup';
   const target = useMemo(() => {
     if (!callbackUrl || callbackUrl.startsWith('/api/auth')) return '/';
     return callbackUrl;
   }, [callbackUrl]);
+  const hasGoogle = Boolean(providers?.google);
+  const hasDev = Boolean(providers?.dev);
 
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
+  useEffect(() => {
+    getProviders().then((items) => setProviders(items as Record<string, { id: string; name: string }> | null));
+  }, []);
+
+  const continueWithGoogle = async () => {
+    setError('');
+    if (isSignup) {
+      window.localStorage.setItem('roundtable.pendingWorkbenchName', workspaceName.trim() || 'Product Squad');
+    }
+    setPending(true);
+    await signIn('google', { callbackUrl: target });
+  };
+
+  const submitDev = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError('');
     setPending(true);
@@ -203,37 +218,11 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
           </h1>
           <p style={{ margin: '11px 0 24px', color: 'var(--text-muted)', fontSize: 14.5, lineHeight: 1.55 }}>
             {isSignup
-              ? 'Start with your work email. Your workspace, missions, and agent history will stay tied to this account.'
-              : 'Use the email connected to your workspace to continue where your team left off.'}
+              ? 'Continue with Google. Your verified work email keeps your workspace, missions, and agent history tied to you.'
+              : 'Continue with the Google account connected to your Roundtable workspace.'}
           </p>
 
-          <form onSubmit={submit} style={{ display: 'grid', gap: 13 }}>
-            {isSignup && (
-              <label style={{ display: 'grid', gap: 7, fontSize: 12.5, fontWeight: 700, color: 'var(--text-muted)' }}>
-                Name
-                <input
-                  type="text"
-                  autoComplete="name"
-                  required
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Peitong Qi"
-                  style={inputStyle}
-                />
-              </label>
-            )}
-            <label style={{ display: 'grid', gap: 7, fontSize: 12.5, fontWeight: 700, color: 'var(--text-muted)' }}>
-              Work email
-              <input
-                type="email"
-                autoComplete="email"
-                required
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                placeholder="you@company.com"
-                style={inputStyle}
-              />
-            </label>
+          <div style={{ display: 'grid', gap: 13 }}>
             {isSignup && (
               <label style={{ display: 'grid', gap: 7, fontSize: 12.5, fontWeight: 700, color: 'var(--text-muted)' }}>
                 Workspace name
@@ -256,16 +245,76 @@ export function AuthPage({ mode, callbackUrl = '/' }: AuthPageProps) {
               color: 'var(--bad)', fontSize: 13,
             }}>{error}</div>}
 
-            <button type="submit" disabled={pending} style={{
-              height: 44, border: 'none', borderRadius: 'var(--r-sm)', background: 'var(--accent)',
-              color: '#fff', font: 'inherit', fontSize: 14, fontWeight: 700,
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-              cursor: pending ? 'default' : 'pointer', opacity: pending ? .72 : 1,
-            }}>
-              <Icon name={isSignup ? 'plus' : 'door'} size={15} style={{}} />
-              {pending ? 'Continuing...' : isSignup ? 'Create account' : 'Sign in'}
-            </button>
-          </form>
+            {hasGoogle ? (
+              <button type="button" disabled={pending} onClick={continueWithGoogle} style={{
+                height: 44, border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', background: 'var(--surface)',
+                color: 'var(--text)', font: 'inherit', fontSize: 13.5, fontWeight: 800,
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 9,
+                cursor: pending ? 'default' : 'pointer', opacity: pending ? .72 : 1, boxShadow: 'var(--shadow-card)',
+              }}>
+                <GoogleMark />
+                {pending ? 'Opening Google...' : 'Continue with Google'}
+              </button>
+            ) : providers === null ? (
+              <div style={{ height: 44, display: 'grid', placeItems: 'center', color: 'var(--text-faint)', fontSize: 12.5 }}>
+                Loading sign-in options...
+              </div>
+            ) : (
+              <div style={{
+                padding: '10px 11px', borderRadius: 'var(--r-sm)',
+                background: 'var(--surface-2)', border: '1px solid var(--border)',
+                color: 'var(--text-muted)', fontSize: 12.5, lineHeight: 1.45,
+              }}>
+                Google OAuth is not configured for this environment.
+              </div>
+            )}
+
+            {hasDev && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 9, margin: '3px 0' }}>
+                  <span style={{ height: 1, background: 'var(--border)', flex: 1 }} />
+                  <span className="mono" style={{ color: 'var(--text-faint)', fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.08em' }}>Developer only</span>
+                  <span style={{ height: 1, background: 'var(--border)', flex: 1 }} />
+                </div>
+                <form onSubmit={submitDev} style={{ display: 'grid', gap: 11 }}>
+                  {isSignup && (
+                    <label style={{ display: 'grid', gap: 7, fontSize: 12.5, fontWeight: 700, color: 'var(--text-muted)' }}>
+                      Name
+                      <input
+                        type="text"
+                        autoComplete="name"
+                        required
+                        value={name}
+                        onChange={(event) => setName(event.target.value)}
+                        placeholder="Peitong Qi"
+                        style={inputStyle}
+                      />
+                    </label>
+                  )}
+                  <label style={{ display: 'grid', gap: 7, fontSize: 12.5, fontWeight: 700, color: 'var(--text-muted)' }}>
+                    Dev email
+                    <input
+                      type="email"
+                      autoComplete="email"
+                      required
+                      value={email}
+                      onChange={(event) => setEmail(event.target.value)}
+                      placeholder="you@company.com"
+                      style={inputStyle}
+                    />
+                  </label>
+                  <button type="submit" disabled={pending} style={{
+                    height: 40, border: '1px solid var(--border)', borderRadius: 'var(--r-sm)',
+                    background: 'var(--surface-2)', color: 'var(--text-muted)',
+                    font: 'inherit', fontSize: 12.5, fontWeight: 750,
+                    cursor: pending ? 'default' : 'pointer', opacity: pending ? .72 : 1,
+                  }}>
+                    {pending ? 'Continuing...' : isSignup ? 'Continue in dev mode' : 'Sign in in dev mode'}
+                  </button>
+                </form>
+              </>
+            )}
+          </div>
 
           <div style={{
             marginTop: 22, paddingTop: 18, borderTop: '1px solid var(--border)',
@@ -299,6 +348,17 @@ function tabStyle(active: boolean) {
     fontSize: 13,
     fontWeight: 700,
   };
+}
+
+function GoogleMark() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 48 48" aria-hidden="true">
+      <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34.1 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 19.4-8 19.4-20c0-1.3-.1-2.4-.4-3.5z" />
+      <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34.1 6.1 29.3 4 24 4c-7.7 0-14.3 4.3-17.7 10.7z" />
+      <path fill="#4CAF50" d="M24 44c5.2 0 10-2 13.5-5.3l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.8L6.2 33.2C9.6 39.6 16.2 44 24 44z" />
+      <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.2-4 5.5l6.2 5.2C36.9 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z" />
+    </svg>
+  );
 }
 
 const linkStyle = {

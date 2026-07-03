@@ -49,6 +49,26 @@ The initial Postgres backend stores one `jsonb` document in `roundtable_store`.
 That keeps the current action layer stable; split into relational tables later
 when search, analytics, or high-concurrency collaboration need it.
 
+## Auth
+
+Roundtable uses NextAuth. Production sign-in should use Google OAuth with a
+verified Google email; the credentials provider is only a local developer
+fallback.
+
+Create an OAuth client in Google Cloud Console and set:
+
+```bash
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+NEXTAUTH_URL=https://your-domain.com
+NEXTAUTH_SECRET=...
+```
+
+Authorized redirect URIs:
+
+- `http://localhost:3000/api/auth/callback/google` for local dev
+- `https://your-domain.com/api/auth/callback/google` for production
+
 ## Dispatch: DAG scheduler
 
 `dispatchTurn` runs a turn's plan through a topological (Kahn-wave) scheduler
