@@ -3,7 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createChat } from '../src/server/actions/chat-actions.js';
-import { getMission, getMissionByTurn, listMissions, listWorkflowTemplates } from '../src/server/actions/mission-actions.js';
+import {
+  getMission,
+  getMissionByTurn,
+  listMissions,
+  listWorkflowTemplates,
+  selectWorkflowTemplate,
+} from '../src/server/actions/mission-actions.js';
 import { approveTurn, createTurn, decideTurnFinalDelivery } from '../src/server/actions/turn-actions.js';
 import { createWorkbench } from '../src/server/actions/workbench-actions.js';
 import { resetData } from '../src/server/store.js';
@@ -58,6 +64,11 @@ describe('Mission P0 migration', () => {
     expect(featureBuilder?.stages.find((stage) => stage.id === 'review')?.requiredCapabilities).toContain('review.quality_gate');
   });
 
+  it('selects non-English workflow templates without relying on word boundaries', () => {
+    expect(selectWorkflowTemplate('修复登录报错问题').id).toBe('wf-bug-fixer');
+    expect(selectWorkflowTemplate('熟悉这个代码库架构').id).toBe('wf-codebase-onboarding');
+  });
+
   it('creates a Mission from a turn and advances it through dispatch', async () => {
     const workbench = await createWorkbench(actor, { name: 'Mission test' });
     const chat = await createChat(actor, { workbenchId: workbench.id, title: 'Mission test' });
@@ -93,12 +104,13 @@ describe('Mission P0 migration', () => {
     expect(result.dispatchStatus).toBe('completed');
     expect(result.mission?.status).toBe('completed');
     expect(result.mission?.finalDelivery.status).toBe('ready');
-    expect(result.mission?.finalDelivery.reportArtifactId).toBe(`final_report_${turn.id}`);
+    // Report artifacts are chat-scoped so follow-up turns replace them in place.
+    expect(result.mission?.finalDelivery.reportArtifactId).toBe(`final_report_${chat.id}`);
     expect(result.mission?.finalDelivery.confidence).toBe('pass');
     expect(result.mission?.finalDelivery.testsObserved).toBe(true);
-    expect(result.artifacts.find((artifact) => artifact.id === `final_report_${turn.id}`)?.preview)
+    expect(result.artifacts.find((artifact) => artifact.id === `final_report_${chat.id}`)?.preview)
       .toContain('Final Delivery Report');
-    expect(JSON.parse(result.artifacts.find((artifact) => artifact.id === `review_summary_${turn.id}`)?.preview ?? '{}')?.confidence)
+    expect(JSON.parse(result.artifacts.find((artifact) => artifact.id === `review_summary_${chat.id}`)?.preview ?? '{}')?.confidence)
       .toBe('pass');
     expect(result.workflowRun?.stageStates.plan?.status).toBe('done');
     expect(result.workflowRun?.stageStates.build?.status).toBe('done');

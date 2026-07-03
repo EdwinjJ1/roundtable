@@ -15,7 +15,7 @@ import { EditHandoffModal } from './modals';
 import { UserMsg } from './live-turn';
 import { RT } from '../lib/rt';
 
-const { useState, useEffect, useMemo, useRef } = React;
+const { useState, useEffect, useRef, useMemo } = React;
 
 /* ---- Aggregate quick actions --------------------------------------------- */
 function Aggregate({ beat, agents, onAction }) {
@@ -249,6 +249,12 @@ function TopBar({ t, setTweak, view, setView, authStatus, user, onSignIn, onSign
         { v: 'roundtable', label: 'Roundtable', icon: 'layers' },
         { v: 'workflow', label: 'Workflow', icon: 'sparkle' }]} />
       <div style={{ flex: 1 }} />
+      <a href="/agents" title="Agent CLI console" style={{ ...iconBtn, background: 'var(--surface-2)', color: 'var(--text-muted)', textDecoration: 'none' }}>
+        <Icon name="code" size={16} />
+      </a>
+      <a href="/settings" title="Settings" style={{ ...iconBtn, background: 'var(--surface-2)', color: 'var(--text-muted)', textDecoration: 'none' }}>
+        <Icon name="wrench" size={16} />
+      </a>
       <AccountControl authStatus={authStatus} user={user} onSignIn={onSignIn} onSignUp={onSignUp} onSignOut={onSignOut} />
       <button onClick={() => setTweak('theme', t.theme === 'light' ? 'dark' : 'light')} title="Toggle theme"
         style={{ ...iconBtn, background: 'var(--surface-2)' }}>

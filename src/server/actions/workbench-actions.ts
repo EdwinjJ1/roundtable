@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve } from 'node:path';
-import { id, mutateData, nowIso } from '../store.js';
+import { id, mutateData, nowIso, readData } from '../store.js';
 import type { Actor, Workbench } from '../types.js';
 
 export type CreateWorkbenchInput = {
@@ -9,11 +9,10 @@ export type CreateWorkbenchInput = {
 };
 
 export async function listWorkbenches(actor: Actor): Promise<Workbench[]> {
-  return mutateData((data) =>
-    data.workbenches
-      .filter((workbench) => workbench.ownerId === actor.id)
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
-  );
+  const data = await readData();
+  return data.workbenches
+    .filter((workbench) => workbench.ownerId === actor.id)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export async function createWorkbench(actor: Actor, input: CreateWorkbenchInput): Promise<Workbench> {
@@ -38,14 +37,30 @@ export async function createWorkbench(actor: Actor, input: CreateWorkbenchInput)
 
 export function workspacePathForWorkbench(ownerId: string, workbenchId: string, requestedPath?: string | undefined): string {
   const candidate = requestedPath?.trim();
-  if (candidate && customWorkspacePathsAllowed()) return resolve(candidate);
+  if (candidate && customWorkspacePathsAllowed()) {
+    const resolved = resolve(candidate);
+    if (!isForbiddenWorkspace(resolved)) return resolved;
+  }
   return defaultWorkspacePath(ownerId, workbenchId);
 }
 
 export function storedWorkspacePath(workbench: Workbench): string {
   const resolved = resolve(workbench.workspacePath);
+  if (isForbiddenWorkspace(resolved)) return defaultWorkspacePath(workbench.ownerId, workbench.id);
   if (customWorkspacePathsAllowed() || isPathInside(workspaceRoot(), resolved)) return resolved;
   return defaultWorkspacePath(workbench.ownerId, workbench.id);
+}
+
+// Agents run inside the workspace with file-write access. If the workspace is
+// this app's own source tree (or a directory containing it), an agent asked to
+// "build a website" will happily write its pages INTO the product's src/ — that
+// actually happened. No configuration may point a workspace at the app root or
+// any ancestor of it. Dedicated subdirectories (e.g. .roundtable/workspaces/*)
+// remain fine.
+export function isForbiddenWorkspace(target: string): boolean {
+  const appRoot = process.cwd();
+  const rel = relative(resolve(target), appRoot);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 function defaultWorkspacePath(ownerId: string, workbenchId: string): string {
@@ -66,7 +81,6 @@ function isPathInside(root: string, target: string): boolean {
 }
 
 export async function getWorkbench(actor: Actor, workbenchId: string): Promise<Workbench | null> {
-  return mutateData((data) =>
-    data.workbenches.find((workbench) => workbench.ownerId === actor.id && workbench.id === workbenchId) ?? null,
-  );
+  const data = await readData();
+  return data.workbenches.find((workbench) => workbench.ownerId === actor.id && workbench.id === workbenchId) ?? null;
 }

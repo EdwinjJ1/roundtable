@@ -8,8 +8,6 @@ export interface AuthSession extends Session {
   user: Actor;
 }
 
-export type AuthUser = Actor;
-
 export async function upsertUser(emailInput: string, nameInput?: string | null): Promise<Actor> {
   const email = emailInput.trim().toLowerCase();
   if (!email) throw new Error('missing_email');

@@ -102,6 +102,104 @@ export type WorkflowTemplate = {
 
 export type AgentRole = 'planner' | 'pm' | 'architect' | 'implementer' | 'reviewer' | 'fixer';
 
+export type AgentRuntimeKind =
+  | 'local-dispatch'
+  | 'custom-cli'
+  | 'claude-code'
+  | 'claude-code-router'
+  | 'codex'
+  | 'opencode';
+
+export type AgentRuntimeInteractionMode = 'auto' | 'manual';
+export type AgentRuntimeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export type AgentRuntimeConfig = {
+  agentId: string;
+  runtime: AgentRuntimeKind;
+  command: string | null;
+  args: string[];
+  env: Record<string, string>;
+  model: string | null;
+  modelProvider: ModelProviderKind | null;
+  interactionMode: AgentRuntimeInteractionMode | null;
+  effort: AgentRuntimeEffort | null;
+  updatedAt: string;
+};
+
+export type AgentRuntimeDefaultConfig = {
+  runtime: AgentRuntimeKind;
+  command: string | null;
+  args: string[];
+  env: Record<string, string>;
+  model: string | null;
+  modelProvider: ModelProviderKind | null;
+  interactionMode: AgentRuntimeInteractionMode | null;
+  effort: AgentRuntimeEffort | null;
+  updatedAt: string;
+};
+
+export type AgentRuntimeConversationStatus = 'running' | 'completed' | 'failed' | 'stopped';
+
+export type AgentRuntimeTranscriptEntry = {
+  at: string;
+  kind: 'status' | 'thinking' | 'response' | 'error';
+  content: string;
+};
+
+// Response-only view of a task's live runtime conversation, attached to turns
+// by listTurns so the polling UI can stream agent activity while a run is hot.
+// Never persisted on the turn itself — conversations remain the source of truth.
+export type TurnTaskActivity = {
+  conversationId: string;
+  agentId: string;
+  runtime: AgentRuntimeKind;
+  status: AgentRuntimeConversationStatus;
+  error: string | null;
+  updatedAt: string;
+  transcript: AgentRuntimeTranscriptEntry[];
+};
+
+export type TurnLiveActivity = Record<string, TurnTaskActivity>;
+
+export type AgentRuntimeConversation = {
+  id: string;
+  agentId: string;
+  role: AgentRole;
+  runtime: AgentRuntimeKind;
+  title: string;
+  turnId: string | null;
+  taskId: string | null;
+  workspacePath: string;
+  cwd: string;
+  command: string;
+  pid: number | null;
+  status: AgentRuntimeConversationStatus;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+  events: AgentEvent[];
+  transcript: AgentRuntimeTranscriptEntry[];
+  error: string | null;
+};
+
+export type ModelProviderKind = 'minimax' | 'openai-compatible';
+
+export type ModelProviderConfig = {
+  provider: ModelProviderKind;
+  enabled: boolean;
+  label: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string | null;
+  updatedAt: string;
+};
+
+export type RoundtableSettings = {
+  defaultAgentAdapter: string | null;
+  modelProviders: ModelProviderConfig[];
+  updatedAt: string;
+};
+
 export type AgentCard = {
   id: string;
   name: string;
@@ -198,7 +296,7 @@ export type WorkbenchPin = {
 };
 
 export type Intake = {
-  intentType: 'build' | 'review' | 'research' | 'fix';
+  intentType: 'build' | 'review' | 'research' | 'fix' | 'question';
   summary: string;
   clarity: 'low' | 'medium' | 'high';
   risk: 'low' | 'medium' | 'high';
@@ -243,6 +341,16 @@ export type PlanTask = {
   priority?: number | undefined;
   producedFor?: string | undefined;
   fixRound?: number | undefined;
+  // Set on fixer tasks that repair a concrete deliverable (e.g. an HTML page):
+  // the workspace path the corrected output should be written to, and the task
+  // whose artifact gets updated in place so the preview shows the fixed version.
+  repairTargetPath?: string | undefined;
+  repairTargetTaskId?: string | undefined;
+  // Set on fixer tasks derived from a failed PLANNING task (and inherited by
+  // chained fix rounds): the fixer must only re-produce the plan — it is not
+  // allowed to touch source/product files. Implementation stays with the
+  // build stage that runs once the repaired plan is in place.
+  replanOnly?: boolean | undefined;
 };
 
 export type Plan = {

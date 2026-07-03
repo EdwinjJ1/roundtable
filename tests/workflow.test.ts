@@ -6,6 +6,7 @@ import { createChat, createMessage, deleteChat } from '../src/server/actions/cha
 import { normalizeAdapter } from '../src/server/actions/agent-runner.js';
 import { listMissions, rejectHandoff } from '../src/server/actions/mission-actions.js';
 import { listHandoffsByChat } from '../src/server/actions/read-actions.js';
+import { saveAgentRuntimeConfig } from '../src/server/actions/runtime-actions.js';
 import { answerClarification, approveTurn, createTurn, listTurns, reviewSeverities } from '../src/server/actions/turn-actions.js';
 import { createWorkbench } from '../src/server/actions/workbench-actions.js';
 import { resetData } from '../src/server/store.js';
@@ -34,8 +35,6 @@ afterEach(async () => {
   delete process.env.ROUNDTABLE_DATA_PATH;
   delete process.env.ROUNDTABLE_WORKSPACE_ROOT;
   delete process.env.ROUNDTABLE_AGENT_ADAPTER;
-  delete process.env.ROUNDTABLE_AGENT_COMMAND;
-  delete process.env.ROUNDTABLE_AGENT_ARGS;
   delete process.env.ROUNDTABLE_ENABLE_EXTERNAL_AGENT;
   delete process.env.ROUNDTABLE_ALLOW_CLAUDE_CLI;
   delete process.env.ROUNDTABLE_CLARIFY_ENABLED;
@@ -88,9 +87,11 @@ describe('Roundtable clean workflow', () => {
     expect(approval.artifacts.find((artifact) => artifact.id.startsWith('task_vera_'))?.preview)
       .toContain('Previous agent output');
     expect(approval.artifacts.find((artifact) => artifact.id.startsWith('task_vera_'))?.preview)
-      .toContain('HandoffCard V2');
+      .toContain('Roundtable handoff');
+    expect(approval.artifacts.find((artifact) => artifact.id.startsWith('task_vera_'))?.preview)
+      .toContain('Upstream output');
 
-    const history = await listTurns(actor, chat.id);
+    const history = await listTurns(chat.id, { actor });
     expect(history).toHaveLength(1);
     expect(history[0]?.dispatchStatus).toBe('completed');
 
@@ -180,7 +181,7 @@ describe('Roundtable clean workflow', () => {
 
     // After the planner runs, the plan defines the work — downstream tasks get
     // concrete, named titles (no longer "awaiting plan").
-    const after = (await listTurns(actor)).find((t) => t.id === turn.id);
+    const after = (await listTurns(undefined, { actor })).find((t) => t.id === turn.id);
     const buildAfter = after?.plan.tasks.find((task) => task.role === 'implementer');
     const reviewAfter = after?.plan.tasks.find((task) => task.role === 'reviewer');
     expect(buildAfter?.title).not.toMatch(/awaiting plan/i);
@@ -238,9 +239,9 @@ describe('Roundtable clean workflow', () => {
   });
 
   it('can dispatch through an explicitly enabled external CLI command adapter', async () => {
-    process.env.ROUNDTABLE_ENABLE_EXTERNAL_AGENT = '1';
-    process.env.ROUNDTABLE_AGENT_COMMAND = 'printf';
-    process.env.ROUNDTABLE_AGENT_ARGS = '{prompt}';
+    await configureRuntimeOutput('orchestrator', 'external planner output');
+    await configureRuntimeOutput('atlas', 'external implementer output');
+    await configureRuntimeOutput('vera', 'external reviewer output');
 
     const workbench = await createWorkbench(actor, {
       name: 'External adapter test',
@@ -269,3 +270,12 @@ describe('Roundtable clean workflow', () => {
     expect(approval.records.every((record) => record.events.some((event) => event.type === 'tool_use'))).toBe(true);
   });
 });
+
+async function configureRuntimeOutput(agentId: string, text: string): Promise<void> {
+  await saveAgentRuntimeConfig({
+    agentId,
+    runtime: 'custom-cli',
+    command: process.execPath,
+    args: ['-e', `process.stdout.write(${JSON.stringify(text)})`],
+  });
+}

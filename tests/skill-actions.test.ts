@@ -75,7 +75,8 @@ describe('User skills', () => {
     expect(turn.mission?.workingStyle.skills.map((skill) => skill.key)).toContain('plan_before_implementation');
     expect(turn.mission?.workingStyle.projectRules).toContain('Show visual approval before marking UI work done.');
     expect(turn.plan.tasks[0]?.brief).toContain('Plan before implementation');
-    expect(turn.artifacts.find((artifact) => artifact.id === `intake_${turn.id}`)?.preview)
+    // Intake artifacts are chat-scoped so follow-up turns replace them in place.
+    expect(turn.artifacts.find((artifact) => artifact.id === `intake_${chat.id}`)?.preview)
       .toContain('Show visual approval before marking UI work done.');
   });
 

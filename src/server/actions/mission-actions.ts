@@ -297,10 +297,10 @@ export function workflowTemplateById(idValue: string | null | undefined): Workfl
 
 export function selectWorkflowTemplate(message: string): WorkflowTemplate {
   const lower = message.toLowerCase();
-  if (/\b(bug|fix|error|crash|broken|regression|修复|报错|故障|bug)\b/i.test(lower)) {
+  if (/\b(bug|fix|error|crash|broken|regression)\b/i.test(lower) || /(修复|报错|故障)/.test(lower)) {
     return workflowTemplateById('wf-bug-fixer');
   }
-  if (/\b(onboard|understand|architecture|map|learn|熟悉|理解|架构|代码库|导览)\b/i.test(lower)) {
+  if (/\b(onboard|understand|architecture|map|learn)\b/i.test(lower) || /(熟悉|理解|架构|代码库|导览)/.test(lower)) {
     return workflowTemplateById('wf-codebase-onboarding');
   }
   return workflowTemplateById('wf-feature-builder');
@@ -881,8 +881,10 @@ function updateDecisions(
 
 function finalDeliveryForTurn(turn: LocalTurn): MissionFinalDelivery {
   if (turn.dispatchStatus !== 'completed') return initialFinalDelivery();
-  const reportArtifact = turn.artifacts.find((artifact) => artifact.id === `final_report_${turn.id}`);
-  const summaryArtifact = turn.artifacts.find((artifact) => artifact.id === `review_summary_${turn.id}`);
+  // Report artifacts are scoped to the chat when one exists (so follow-up turns
+  // replace them) and to the turn otherwise — match by prefix, not exact id.
+  const reportArtifact = turn.artifacts.find((artifact) => artifact.id.startsWith('final_report_'));
+  const summaryArtifact = turn.artifacts.find((artifact) => artifact.id.startsWith('review_summary_'));
   const summary = parseReviewSummary(summaryArtifact?.preview);
   const reviewArtifact = turn.artifacts.find((artifact) => artifact.ownerAgentId === 'vera' || artifact.ownerAgentId === 'reviewer');
   const reportText = reportArtifact?.preview ?? '';

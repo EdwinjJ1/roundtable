@@ -72,7 +72,7 @@ export async function runCliAction(action: string, input: Record<string, unknown
   }
 
   if (action === 'roundtable.history.list') {
-    const turns = await listTurns(actor, optionalString(input, 'chatId'));
+    const turns = await listTurns(optionalString(input, 'chatId'), { actor });
     return result({ turns, count: turns.length });
   }
 
@@ -96,7 +96,7 @@ export async function runCliAction(action: string, input: Record<string, unknown
       autoDispatch: true,
       agentAdapter: optionalString(input, 'agentAdapter') || 'local-dispatch',
     });
-    const turns = await listTurns(actor, chat.id);
+    const turns = await listTurns(chat.id, { actor });
     return result({
       workbench,
       chat,

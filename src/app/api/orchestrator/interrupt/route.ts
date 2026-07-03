@@ -11,7 +11,7 @@ export async function POST(req: Request) {
     const body = BodySchema.parse(await req.json());
     const actor = await routeActor();
     if (!actor) throw new Error('unauthorized');
-    return Response.json(await interruptTurn(actor, body.turnId));
+    return Response.json(await interruptTurn(body.turnId, { actor }));
   } catch (error) {
     return jsonError(error);
   }
