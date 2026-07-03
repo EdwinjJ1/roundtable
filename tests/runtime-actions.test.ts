@@ -1,10 +1,11 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runAgentTask } from '../src/server/actions/agent-runner.js';
 import { AGENT_ROSTER } from '../src/server/actions/agent-roster.js';
 import { executeCliRuntime } from '../src/server/actions/cli-runtimes/runner.js';
+import { probeRuntime } from '../src/server/actions/cli-runtimes/probe.js';
 import {
   listRuntimeState,
   saveAgentRuntimeConfig,
@@ -77,6 +78,61 @@ describe('CLI runtime runner', () => {
 
     expect(result.ok).toBe(true);
     expect(result.text).toBe('codex:hello codex');
+  });
+
+  it('skips incompatible Codex wrappers and executes a Codex CLI that supports exec json', async () => {
+    const badDir = join(tempDir, 'bad-bin');
+    const goodDir = join(tempDir, 'good-bin');
+    await mkdir(badDir, { recursive: true });
+    await mkdir(goodDir, { recursive: true });
+    await writeCodexFixture(join(badDir, 'codex'), false);
+    await writeCodexFixture(join(goodDir, 'codex'), true);
+
+    const result = await executeCliRuntime({
+      conversationId: 'codex-path-test',
+      runtime: 'codex',
+      agent: agent('atlas'),
+      config: null,
+      workspace: tempDir,
+      prompt: 'hello codex',
+      timeoutMs: 2_000,
+      envSnapshot: {
+        ...process.env,
+        PATH: `${badDir}:${goodDir}:${process.env.PATH ?? ''}`,
+        OPENAI_API_KEY: 'test-key',
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.command.startsWith(join(goodDir, 'codex'))).toBe(true);
+    expect(result.text).toBe('good:hello codex');
+  });
+
+  it('surfaces stderr in failure text and error detail when a runtime exits non-zero', async () => {
+    const result = await executeCliRuntime({
+      conversationId: 'stderr-test',
+      runtime: 'custom-cli',
+      agent: agent('atlas'),
+      config: runtimeConfig('atlas', 'custom-cli', [
+        '-e',
+        [
+          'process.stdout.write("Service not running, starting service...");',
+          'process.stderr.write("Service startup timeout, please manually run ccr start\\n");',
+          'process.exit(1)',
+        ].join(''),
+      ]),
+      workspace: tempDir,
+      prompt: 'ignored prompt',
+      timeoutMs: 2_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain('Service not running, starting service...');
+    expect(result.text).toContain('Service startup timeout');
+    expect(result.error).toContain('runtime_exit_1');
+    expect(result.error).toContain('Service startup timeout');
+    const errorEvent = result.events.find((event) => event.type === 'error');
+    expect(errorEvent && 'message' in errorEvent ? errorEvent.message : '').toContain('Service startup timeout');
   });
 
   it('parses concatenated OpenCode JSON objects', async () => {
@@ -173,9 +229,69 @@ describe('runtime config and workflow dispatch integration', () => {
       configured: true,
       configuredEnvKeys: ['ANTHROPIC_API_KEY'],
       ready: true,
+      commandPath: process.execPath,
+      detectedVersion: null,
+      authConfigured: true,
+      authSources: ['custom-command'],
     });
     expect(JSON.stringify(state)).not.toContain('secret-key');
     expect(stored?.env).toEqual({ ANTHROPIC_API_KEY: 'secret-key' });
+  });
+
+  it('marks runtimes not ready when the configured command is missing', async () => {
+    await saveRuntimeDefaultConfig({
+      runtime: 'claude-code',
+      command: join(tempDir, 'missing-claude'),
+    });
+
+    const state = await listRuntimeState();
+    const claude = state.supported.find((item) => item.kind === 'claude-code');
+
+    expect(claude).toMatchObject({
+      ready: false,
+      readyReason: `Missing command: ${join(tempDir, 'missing-claude')}`,
+      commandPath: null,
+      authConfigured: false,
+    });
+  });
+
+  it('marks claude-code-router not ready without a model provider or global router config', async () => {
+    const ccrPath = join(tempDir, 'ccr');
+    await writeFile(ccrPath, '#!/bin/sh\nexit 0\n');
+    await chmod(ccrPath, 0o755);
+
+    const probe = await probeRuntime(
+      'claude-code-router',
+      { ...runtimeConfig('atlas', 'claude-code-router', []), command: ccrPath },
+      { ...process.env, HOME: tempDir },
+    );
+
+    expect(probe.ready).toBe(false);
+    expect(probe.reason).toContain('claude-code-router has no backing model API');
+  });
+
+  it('marks claude-code-router ready once a model provider is configured', async () => {
+    const ccrPath = join(tempDir, 'ccr');
+    await writeFile(ccrPath, '#!/bin/sh\nexit 0\n');
+    await chmod(ccrPath, 0o755);
+    await saveSettings({
+      providers: [{
+        provider: 'minimax',
+        enabled: true,
+        baseUrl: 'https://api.minimaxi.com/v1',
+        model: 'MiniMax-M3',
+        apiKey: 'mini-secret',
+      }],
+    });
+
+    const probe = await probeRuntime(
+      'claude-code-router',
+      { ...runtimeConfig('atlas', 'claude-code-router', []), command: ccrPath },
+      { ...process.env, HOME: tempDir },
+    );
+
+    expect(probe.ready).toBe(true);
+    expect(probe.authSources).toContain('model-provider:minimax');
   });
 
   it('configures Claude Code Router with a saved MiniMax provider without exposing the key', async () => {
@@ -303,6 +419,21 @@ describe('runtime config and workflow dispatch integration', () => {
       status: 'completed',
     });
   }, 10_000);
+
+  it('fails before spawning when a runtime command is unavailable', async () => {
+    await expect(executeCliRuntime({
+      conversationId: 'missing-command-test',
+      runtime: 'claude-code',
+      agent: agent('atlas'),
+      config: {
+        ...runtimeConfig('atlas', 'claude-code', []),
+        command: join(tempDir, 'missing-claude'),
+      },
+      workspace: tempDir,
+      prompt: 'ignored prompt',
+      timeoutMs: 2_000,
+    })).rejects.toThrow(`runtime_not_ready:Missing command: ${join(tempDir, 'missing-claude')}`);
+  });
 });
 
 function agent(id: string) {
@@ -337,4 +468,28 @@ function atlasTask(): PlanTask {
     deps: [],
     parallel: false,
   };
+}
+
+async function writeCodexFixture(path: string, supportsExecJson: boolean): Promise<void> {
+  const source = `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args.includes('--version')) {
+  console.log(${JSON.stringify(supportsExecJson ? 'codex-cli 0.142.5' : 'codex-tui 0.0.0')});
+  process.exit(0);
+}
+if (args[0] === 'exec' && args.includes('--help')) {
+  console.log(${JSON.stringify(supportsExecJson ? 'Run Codex non-interactively\\n      --json' : 'Usage: codex <PROMPT>')});
+  process.exit(0);
+}
+if (args[0] === 'exec' && ${JSON.stringify(supportsExecJson)}) {
+  const input = fs.readFileSync(0, 'utf8').trim();
+  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'good:' + input } }));
+  process.exit(0);
+}
+console.error('unsupported codex fixture');
+process.exit(2);
+`;
+  await writeFile(path, source);
+  await chmod(path, 0o755);
 }

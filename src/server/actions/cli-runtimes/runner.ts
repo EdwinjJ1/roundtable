@@ -2,9 +2,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { AgentEvent, AgentRuntimeConfig, AgentRuntimeKind, ModelProviderKind } from '../../types.js';
-import { resolveModelProvider } from '../settings-actions.js';
+import { defaultConfiguredModelProvider, resolveModelProvider } from '../settings-actions.js';
 import type { AgentProfile } from '../agent-roster.js';
 import { envKey, runtimeDefinition } from './registry.js';
+import { assertRuntimeReady, resolveRuntimeCommand, runtimeEnvName } from './probe.js';
 
 export type RuntimeExecutionResult = {
   text: string;
@@ -49,6 +50,7 @@ export function stopActiveRuntimeConversation(conversationId: string): boolean {
 
 export async function executeCliRuntime(input: RuntimeExecutionInput): Promise<RuntimeExecutionResult> {
   const commandSpec = await commandForRuntime(input);
+  await assertRuntimeReady(input.runtime, commandSpec.command, commandSpec.env);
   const events: AgentEvent[] = [];
   let stdout = '';
   let stderr = '';
@@ -111,18 +113,27 @@ export async function executeCliRuntime(input: RuntimeExecutionInput): Promise<R
   await pending;
   await parser.flush(emit);
 
-  const finalText = parser.text().trim() || stdout.trim() || stderr.trim();
-  const ok = !timedOut && exitCode === 0 && finalText.length > 0;
+  const parsedText = parser.text().trim() || stdout.trim() || stderr.trim();
+  const ok = !timedOut && exitCode === 0 && parsedText.length > 0;
+  // On failure the interesting detail is usually on stderr (e.g. "Service
+  // startup timeout" from ccr) while stdout only has a banner — keep both.
+  const failureText = [parsedText, stderr.trim()]
+    .filter((part, index, parts) => part.length > 0 && parts.indexOf(part) === index)
+    .join('\n\n');
+  const finalText = ok ? parsedText : failureText || parsedText;
   const error = timedOut ? 'runtime_timeout' : ok ? null : `runtime_exit_${exitCode}`;
+  const errorDetail = error === null ? null : [error, stderrSummary(stderr)].filter(Boolean).join(': ');
   const terminal: AgentEvent = ok
     ? { type: 'done', finishReason: 'completed' }
-    : { type: 'error', message: error ?? 'runtime_failed', recoverable: true };
-  await emit(terminal, ok ? undefined : { kind: 'error', content: error ?? 'runtime_failed' });
+    : { type: 'error', message: errorDetail ?? 'runtime_failed', recoverable: true };
+  await emit(terminal, ok
+    ? { kind: 'response', content: finalText.slice(0, 1_500) }
+    : { kind: 'error', content: errorDetail ?? 'runtime_failed' });
 
   return {
     text: finalText,
     ok,
-    error,
+    error: errorDetail,
     command: commandSpec.display,
     pid: child.pid ?? null,
     events,
@@ -151,16 +162,17 @@ async function commandForRuntime(input: RuntimeExecutionInput): Promise<CommandS
     || runtimeEnv[`ROUNDTABLE_${runtimeEnvName(input.runtime)}_COMMAND`]
     || runtimeDefinition(input.runtime).binary
     || input.runtime;
+  const resolvedCommand = await resolveRuntimeCommand(input.runtime, command, env) ?? command;
 
   if (input.runtime === 'claude-code') {
     const args = configuredRuntimeArgs(input) ?? claudePrintArgs(input, env);
-    return commandSpec(command, args, null, env);
+    return commandSpec(resolvedCommand, args, null, env);
   }
 
   if (input.runtime === 'claude-code-router') {
     await prepareClaudeCodeRouterConfig(input, env);
     const args = configuredRuntimeArgs(input) ?? ['code', ...claudePrintArgs(input, env, { includeModel: false })];
-    return commandSpec(command, args, null, env);
+    return commandSpec(resolvedCommand, args, null, env);
   }
 
   if (input.runtime === 'codex') {
@@ -175,7 +187,7 @@ async function commandForRuntime(input: RuntimeExecutionInput): Promise<CommandS
         input.workspace,
         ...(model ? ['-m', model] : []),
       ];
-    return commandSpec(command, args, input.prompt, env);
+    return commandSpec(resolvedCommand, args, input.prompt, env);
   }
 
   if (input.runtime === 'opencode') {
@@ -189,7 +201,7 @@ async function commandForRuntime(input: RuntimeExecutionInput): Promise<CommandS
         input.workspace,
         ...(model ? ['--model', providerQualifiedOpenCodeModel(model, env)] : []),
       ];
-    return commandSpec(command, args, input.prompt, env);
+    return commandSpec(resolvedCommand, args, input.prompt, env);
   }
 
   return customCommand(input, env);
@@ -241,7 +253,13 @@ async function buildRuntimeEnv(
   runtimeEnv: NodeJS.ProcessEnv,
 ): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = { ...runtimeEnv, ...(config?.env ?? {}) };
-  await applyModelProviderEnv(env, config?.modelProvider ?? null);
+  // claude-code-router is only usable through a model provider: when the agent
+  // config doesn't pin one, fall back to the first configured provider so the
+  // per-run router config below is still generated (instead of silently relying
+  // on a global ~/.claude-code-router/config.json that may not exist).
+  const provider = config?.modelProvider
+    ?? (runtime === 'claude-code-router' ? await defaultConfiguredModelProvider() : null);
+  await applyModelProviderEnv(env, provider);
   const model = runtimeModel(runtime, config, env);
   if ((runtime === 'claude-code' || runtime === 'claude-code-router') && runtimeInteractionMode(config) === 'auto') {
     env.CI = env.CI || 'true';
@@ -344,11 +362,13 @@ async function prepareClaudeCodeRouterConfig(
   input: RuntimeExecutionInput,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
-  const config = input.config;
-  if (!config?.modelProvider) return;
-  const providerName = `roundtable-${config.modelProvider}`;
+  // Set by applyModelProviderEnv for the pinned or defaulted provider; absent
+  // means no provider is configured and the router runs on its own global config.
+  const provider = env.ROUNDTABLE_CCR_PROVIDER;
+  if (!provider) return;
+  const providerName = `roundtable-${provider}`;
   const model = env.ROUNDTABLE_CCR_MODEL || env.LLM_MODEL || env.OPENAI_MODEL;
-  if (!model) throw new Error(`model_provider_missing_model:${config.modelProvider}`);
+  if (!model) throw new Error(`model_provider_missing_model:${provider}`);
 
   const home = roundtableCcrHome(input.workspace, input.conversationId);
   const configDir = join(home, '.claude-code-router');
@@ -422,8 +442,9 @@ function splitArgs(raw: string): string[] {
   return raw.split(/\s+/).map((item) => item.trim()).filter(Boolean);
 }
 
-function runtimeEnvName(runtime: AgentRuntimeKind): string {
-  return runtime.replace(/[^a-zA-Z0-9]+/g, '_').toUpperCase();
+function stderrSummary(stderr: string): string | null {
+  const line = stderr.split(/\r?\n/).map((item) => item.trim()).find(Boolean);
+  return line ? line.slice(0, 200) : null;
 }
 
 function killProcess(child: ChildProcessWithoutNullStreams): void {
