@@ -628,6 +628,15 @@ function App() {
     onSuccess: () => trpcUtils.messages.list.invalidate(),
   });
   const polishPrompt = trpc.ai.polish.useMutation();
+  // Workflow templates are the orchestrator's source of truth for the default
+  // task chain — the editor reads and writes these (not a client-only copy).
+  const workflowTemplatesQ = trpc.missions.templates.useQuery(undefined, { enabled: authed });
+  const saveWorkflowTemplate = trpc.missions.saveTemplate.useMutation({
+    onSuccess: () => trpcUtils.missions.templates.invalidate(),
+  });
+  const deleteWorkflowTemplate = trpc.missions.deleteTemplate.useMutation({
+    onSuccess: () => trpcUtils.missions.templates.invalidate(),
+  });
   const deleteChat = trpc.chats.delete.useMutation({
     onSuccess: () => {
       trpcUtils.chats.list.invalidate();
@@ -1272,7 +1281,10 @@ function App() {
                 workflow={liveWorkflow} workflowRun={liveWorkflowRun} />
             </>
           )}
-          {view === 'workflow' && <WorkflowView agents={agents} onAddAgent={() => setModal('agent')} onOpenTemplates={() => setModal('table')} />}
+          {view === 'workflow' && <WorkflowView agents={agents} onAddAgent={() => setModal('agent')} onOpenTemplates={() => setModal('table')}
+            serverTemplates={authed ? workflowTemplatesQ.data : null}
+            onSaveTemplate={(template) => saveWorkflowTemplate.mutate(template)}
+            onDeleteTemplate={(id) => deleteWorkflowTemplate.mutate({ id })} />}
         </div>
       </div>
 

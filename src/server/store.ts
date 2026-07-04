@@ -943,6 +943,7 @@ function emptySettings(): RoundtableSettings {
   return {
     defaultAgentAdapter: null,
     modelProviders: [],
+    workflowTemplates: [],
     updatedAt: nowIso(),
   };
 }
@@ -952,6 +953,7 @@ function normalizeSettings(raw: Partial<RoundtableSettings> | undefined): Roundt
   return {
     defaultAgentAdapter: typeof raw.defaultAgentAdapter === 'string' ? raw.defaultAgentAdapter : null,
     modelProviders: Array.isArray(raw.modelProviders) ? raw.modelProviders : [],
+    workflowTemplates: Array.isArray(raw.workflowTemplates) ? raw.workflowTemplates : [],
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : nowIso(),
   };
 }

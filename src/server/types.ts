@@ -201,6 +201,10 @@ export type ModelProviderConfig = {
 export type RoundtableSettings = {
   defaultAgentAdapter: string | null;
   modelProviders: ModelProviderConfig[];
+  // User-edited workflow templates. A custom template with a builtin id
+  // OVERRIDES that builtin everywhere (resolution, auto-select, plan
+  // generation); novel ids are additional selectable workflows.
+  workflowTemplates: WorkflowTemplate[];
   updatedAt: string;
 };
 
@@ -334,6 +338,11 @@ export type PlanTask = {
   owner?: string | undefined;
   role?: string | undefined;
   stageId?: string | undefined;
+  // The template stage KIND this task was generated from ('plan' | 'work' |
+  // 'review' …). stageId is the stage's (possibly renamed) id; kind is stable,
+  // so gating logic (e.g. the architect's review check) survives custom
+  // templates that rename their stages.
+  stageKind?: string | undefined;
   requiredCapabilities?: string[] | undefined;
   brief: string;
   deps: string[];

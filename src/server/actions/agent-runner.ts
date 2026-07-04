@@ -720,7 +720,7 @@ const ARCHITECT_PRINCIPLES = [
 // jobs: the first produces the blueprint the implementer follows, the second
 // audits the implementation against it and gates delivery.
 function architectInstruction(task: PlanTask): string {
-  if (task.stageId === 'review') {
+  if ((task.stageKind ?? task.stageId) === 'review') {
     return 'Audit the implemented code against the architecture principles below. '
       + 'Verify modular structure (small cohesive files, clear boundaries), flag every hardcoded value and every piece of '
       + 'copy-pasted logic that should be extracted into a shared module, and confirm the structure supports future extension. '
@@ -781,7 +781,7 @@ function chatAgentPrompt(
     : {
     planner: 'Map the goal into a practical next-step plan. Keep it useful and concise.',
     pm: 'Clarify product intent, constraints, acceptance criteria, and sequencing.',
-    architect: input.task.stageId === 'review'
+    architect: (input.task.stageKind ?? input.task.stageId) === 'review'
       ? 'Audit the upstream implementation for software-engineering discipline: modularity, no hardcoded values, reusable structure. Report findings with Critical/High/Medium labels; if it is solid, say so explicitly.'
       : 'Design the architecture the implementer should follow: module boundaries, file structure, data contracts, naming, and what existing code to reuse. No hardcoded values — name the constants/config instead.',
     implementer: isHtml

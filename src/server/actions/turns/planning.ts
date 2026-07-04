@@ -1,4 +1,4 @@
-import type { Intake, Plan, PlanTask, WorkingStyleSnapshot } from '../../types.js';
+import type { Intake, Plan, PlanTask, WorkflowStage, WorkflowTemplate, WorkingStyleSnapshot } from '../../types.js';
 import { AGENT_ROSTER, mentionedAgents, mentionTokens, messageWithoutMentions, type AgentProfile } from '../agent-roster.js';
 import { emptyWorkingStyle } from '../skill-actions.js';
 import { updateTurn } from './turn-store.js';
@@ -42,6 +42,7 @@ export function planFromMessage(
   message: string,
   workingStyle: WorkingStyleSnapshot = emptyWorkingStyle(),
   intentType?: Intake['intentType'],
+  template?: WorkflowTemplate,
 ): Plan {
   const goal = messageWithoutMentions(message) || message;
   const base = compactTitle(goal);
@@ -61,13 +62,18 @@ export function planFromMessage(
   }
 
   if (!hasExplicitMention) {
+    // The workflow template is the source of truth for the default chain:
+    // stage order, seats, and parallelism come from the (possibly user-edited)
+    // template, so reordering stages in the Workflow editor changes what runs.
+    const templateTasks = template ? tasksFromTemplate(template, message, base, workingStyle) : [];
+    if (templateTasks.length > 0) {
+      return { summary: `Plan for: ${base}`, tasks: templateTasks };
+    }
+    // No template (or a template with no runnable stages): fall back to the
+    // canonical architect-bracketed chain.
     const implementer = implementerForMessage(message);
     const reviewerAgent = reviewer();
     const architectAgent = architect();
-    // The architect brackets the build: an upfront design pass (module
-    // boundaries, contracts, reuse map — before any code exists) and a
-    // post-build architecture check that gates delivery alongside the quality
-    // review. Both reviews depend only on the build so they run in parallel.
     return {
       summary: `Plan for: ${base}`,
       tasks: [
@@ -108,6 +114,119 @@ export function planFromMessage(
   };
 }
 
+// Task-generating stage kinds. intake (user), clarify (clarify gate), repair
+// (derived at runtime by the fix loop), and ship (final-delivery acceptance)
+// are runtime-managed and never planned as agent tasks up front.
+const RUNNABLE_STAGE_KINDS = new Set(['plan', 'work', 'review']);
+
+/**
+ * Generate the task DAG from a workflow template's stages, in stage order.
+ *
+ * Semantics — kept deliberately simple so the Workflow editor's mental model
+ * matches execution exactly:
+ * - Each runnable stage contributes one task per agent seat (user seats skip).
+ * - A seat pinned to an agent uses that agent; a role-only seat resolves at
+ *   plan time (implementer → by message keywords, others → roster default).
+ * - Within a 'plan' stage seats chain sequentially (planner → architect needs
+ *   the plan); within 'work'/'review' stages seats run in parallel.
+ * - Every task in stage N depends on all tasks of the previous runnable stage,
+ *   so reordering stages in the editor reorders execution.
+ */
+export function tasksFromTemplate(
+  template: WorkflowTemplate,
+  message: string,
+  base: string,
+  workingStyle: WorkingStyleSnapshot,
+): PlanTask[] {
+  const goal = messageWithoutMentions(message) || message;
+  const tasks: PlanTask[] = [];
+  const usedIds = new Set<string>();
+  let previousStageTaskIds: string[] = [];
+
+  for (const stage of template.stages) {
+    if (!RUNNABLE_STAGE_KINDS.has(stage.kind)) continue;
+    const agents = agentsForStage(stage, message);
+    if (agents.length === 0) continue;
+
+    const stageTaskIds: string[] = [];
+    const sequential = stage.kind === 'plan';
+    for (const agent of agents) {
+      const idValue = taskIdFor(agent, stage, usedIds);
+      usedIds.add(idValue);
+      const deps = sequential && stageTaskIds.length > 0
+        ? [stageTaskIds[stageTaskIds.length - 1]!]
+        : [...previousStageTaskIds];
+      const task = taskForAgent(
+        idValue,
+        stageTitleForAgent(agent, stage, base),
+        agent,
+        goal,
+        deps,
+        !sequential && agents.length > 1,
+        stage.id,
+        workingStyle,
+      );
+      tasks.push({ ...task, stageKind: stage.kind });
+      stageTaskIds.push(idValue);
+    }
+    previousStageTaskIds = stageTaskIds;
+  }
+  return tasks;
+}
+
+// Resolve a stage's seats to concrete agents. Role-only implementer seats
+// resolve by message keywords (backend-ish → beam, else atlas). Seats that
+// resolve to the same agent within one stage are deduped — a template listing
+// atlas AND beam as implementer candidates still yields one implementer per
+// stage unless the seats pin different agents explicitly... they DO pin here,
+// so a multi-pinned work stage keeps only the message-preferred implementer
+// when all its seats share the implementer role (candidate pool), and keeps
+// every agent otherwise (deliberate multi-agent stage).
+function agentsForStage(stage: WorkflowStage, message: string): AgentProfile[] {
+  const roleSeats = stage.seats.filter(
+    (seatItem): seatItem is typeof seatItem & { ref: { kind: 'role'; role: string; agentId?: string } } =>
+      seatItem.ref.kind === 'role',
+  );
+  if (roleSeats.length === 0) return [];
+
+  // Candidate-pool case: a work stage whose seats are all implementers is
+  // "whoever fits the job", not "everyone at once" — resolve by message.
+  const allImplementers = roleSeats.every((seatItem) => seatItem.ref.role === 'implementer');
+  if (stage.kind === 'work' && allImplementers && roleSeats.length > 1) {
+    return [implementerForMessage(message)];
+  }
+
+  const resolved: AgentProfile[] = [];
+  for (const seatItem of roleSeats) {
+    const agent = seatItem.ref.agentId
+      ? AGENT_ROSTER.find((item) => item.id === seatItem.ref.agentId)
+      : seatItem.ref.role === 'implementer'
+        ? implementerForMessage(message)
+        : AGENT_ROSTER.find((item) => item.role === seatItem.ref.role);
+    if (agent && !resolved.some((item) => item.id === agent.id)) resolved.push(agent);
+  }
+  return resolved;
+}
+
+// Stable ids: the planner keeps its historic 'task_planning' id (the fix loop
+// and retitle logic key off it); everyone else gets task_<agent>; an agent
+// seated in two stages (architect: design + check) gets task_<agent>_<stage>.
+function taskIdFor(agent: AgentProfile, stage: WorkflowStage, used: Set<string>): string {
+  const preferred = agent.role === 'planner' ? 'task_planning' : `task_${agent.id}`;
+  if (!used.has(preferred)) return preferred;
+  const staged = `task_${agent.id}_${stage.id}`;
+  if (!used.has(staged)) return staged;
+  let index = 2;
+  while (used.has(`${staged}_${index}`)) index += 1;
+  return `${staged}_${index}`;
+}
+
+function stageTitleForAgent(agent: AgentProfile, stage: WorkflowStage, base: string): string {
+  if (agent.role === 'planner') return `Plan ${base}`;
+  if (agent.role === 'architect' && stage.kind === 'review') return 'Architecture check · awaits the build';
+  return titleForAgent(agent, base);
+}
+
 function taskForAgent(
   idValue: string,
   title: string,
@@ -146,12 +265,12 @@ function stageIdForAgent(agent: AgentProfile): string {
 // Concrete title for a downstream task AFTER the planner has run. At this point
 // the plan defines the work, so naming the goal is accurate (not a guess). Used
 // by retitleDownstreamTasks() to replace the "awaiting plan" placeholders.
-function plannedTitleForRole(role: string | undefined, stageId: string | undefined, displayName: string, goal: string): string {
+function plannedTitleForRole(role: string | undefined, stageRef: string | undefined, displayName: string, goal: string): string {
   if (role === 'pm') return `Product brief for ${goal}`;
   // The architect appears twice in the default chain: design (plan stage)
   // before the build, and the architecture check (review stage) after it.
   if (role === 'architect') {
-    return stageId === 'review' ? `Architecture check for ${goal}` : `Architecture for ${goal}`;
+    return stageRef === 'review' ? `Architecture check for ${goal}` : `Architecture for ${goal}`;
   }
   if (role === 'implementer') return `Build ${goal} (${displayName})`;
   if (role === 'reviewer') return `Review ${goal}`;
@@ -188,7 +307,7 @@ export function plannedTaskPatches(
   const patches = new Map<string, { title: string; brief: string }>();
   for (const task of tasks) {
     if (!downstream.has(task.id)) continue;
-    const title = plannedTitleForRole(task.role, task.stageId, ownerName(task), goal);
+    const title = plannedTitleForRole(task.role, task.stageKind ?? task.stageId, ownerName(task), goal);
     patches.set(task.id, {
       title,
       // Mirror taskForAgent()'s brief shape so the handoff card reads the same.

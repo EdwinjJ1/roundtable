@@ -16,10 +16,15 @@ export function reviewRequestsFix(): boolean {
 }
 
 // Tasks whose report gates delivery through the review→fix loop: the quality
-// reviewer, and the architect's post-build check (role architect in the review
-// stage — its upfront design task in the plan stage is NOT a gate).
-export function isReviewGateTask(task: { role?: string | undefined; stageId?: string | undefined }): boolean {
-  return task.role === 'reviewer' || (task.role === 'architect' && task.stageId === 'review');
+// reviewer, and the architect's post-build check (role architect in a
+// review-kind stage — its upfront design task in the plan stage is NOT a
+// gate). stageKind survives custom templates that rename stage ids; stageId
+// is the fallback for tasks planned before stageKind existed.
+export function isReviewGateTask(
+  task: { role?: string | undefined; stageId?: string | undefined; stageKind?: string | undefined },
+): boolean {
+  if (task.role === 'reviewer') return true;
+  return task.role === 'architect' && (task.stageKind ?? task.stageId) === 'review';
 }
 
 // Parse a reviewer's Markdown report for severity signals. Counts Critical/High

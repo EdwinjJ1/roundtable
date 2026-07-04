@@ -228,9 +228,10 @@ describe('Roundtable clean workflow', () => {
     expect(turn.plan.tasks[2]?.deps).toEqual(['task_planning', 'task_nova']);
     expect(turn.plan.tasks[3]?.deps).toEqual(['task_beam']);
     // The architecture check reviews the build in parallel with the quality review.
-    expect(turn.plan.tasks[4]?.id).toBe('task_nova_check');
+    expect(turn.plan.tasks[4]?.id).toBe('task_nova_review');
     expect(turn.plan.tasks[4]?.deps).toEqual(['task_beam']);
     expect(turn.plan.tasks[4]?.stageId).toBe('review');
+    expect(turn.plan.tasks[4]?.stageKind).toBe('review');
   });
 
   it('ignores stale external adapter requests unless explicitly enabled', () => {

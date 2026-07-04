@@ -14,7 +14,14 @@ import {
   unpinWorkbench,
   updateUserProfile,
 } from './actions/memory-actions.js';
-import { getMission, listMissions, listWorkflowTemplates } from './actions/mission-actions.js';
+import {
+  deleteWorkflowTemplate,
+  getMission,
+  listMissions,
+  listWorkflowTemplates,
+  saveWorkflowTemplate,
+} from './actions/mission-actions.js';
+import type { WorkflowTemplate } from './types.js';
 import { listArtifactsByChat, listHandoffsByChat } from './actions/read-actions.js';
 import {
   deleteUserSkill,
@@ -123,8 +130,71 @@ const userSkillsRouter = createTRPCRouter({
     .mutation(({ ctx, input }) => deleteUserSkill(ctx.user, input)),
 });
 
+// Structural validation of the editable parts happens in saveWorkflowTemplate
+// (stage ids unique, seats reference known agents, at least one runnable
+// stage); the zod layer only enforces the shape.
+const workflowSeatSchema = z.object({
+  ref: z.union([
+    z.object({ kind: z.literal('user') }),
+    z.object({
+      kind: z.literal('role'),
+      role: z.enum(['planner', 'pm', 'architect', 'implementer', 'reviewer', 'fixer']),
+      agentId: z.string().min(1).optional(),
+    }),
+  ]),
+});
+
+const workflowTemplateSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  tag: z.string().nullable(),
+  desc: z.string(),
+  builtin: z.boolean().optional(),
+  version: z.number().int().nonnegative().optional(),
+  updatedAt: z.string().optional(),
+  planning: z.object({
+    cut: z.enum(['by_role', 'by_capability', 'by_artifact']),
+    clarifyThreshold: z.number().min(0).max(1),
+    maxClarifyQuestions: z.number().int().min(0).max(10),
+  }),
+  stages: z.array(z.object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    icon: z.string(),
+    kind: z.enum(['intake', 'clarify', 'plan', 'work', 'review', 'repair', 'ship']),
+    desc: z.string(),
+    seats: z.array(workflowSeatSchema),
+    fixed: z.boolean().optional(),
+    parallelGroup: z.string().optional(),
+    gate: z.object({
+      kind: z.string(),
+      required: z.boolean(),
+      label: z.string(),
+      description: z.string(),
+      actions: z.array(z.string()),
+    }),
+    requiredInputs: z.array(z.string()),
+    expectedOutputs: z.array(z.string()),
+    requiredCapabilities: z.array(z.string()),
+  })).min(1),
+});
+
 const missionsRouter = createTRPCRouter({
   templates: publicProcedure.query(() => listWorkflowTemplates()),
+  saveTemplate: protectedProcedure
+    .input(workflowTemplateSchema)
+    .mutation(({ input }) => saveWorkflowTemplate({
+      builtin: false,
+      version: 0,
+      updatedAt: '',
+      ...input,
+    } as WorkflowTemplate)),
+  deleteTemplate: protectedProcedure
+    .input(idInput)
+    .mutation(async ({ input }) => {
+      await deleteWorkflowTemplate(input.id);
+      return { ok: true };
+    }),
   list: protectedProcedure
     .input(z.object({ chatId: z.string().min(1).optional() }).optional())
     .query(({ ctx, input }) => listMissions(ctx.user, input?.chatId)),
