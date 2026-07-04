@@ -10,7 +10,6 @@ import type {
   Message,
   Mission,
   UserProfile,
-  UserSkill,
   Workbench,
   WorkbenchPin,
 } from '../server/types.js';
@@ -84,20 +83,6 @@ const profile: UserProfile = {
   defaultBrief: 'Smoke profile',
   defaultSkills: [],
   notes: 'Smoke profile notes',
-  updatedAt: now,
-};
-const skill: UserSkill = {
-  id: id('skill'),
-  userId: marker.id,
-  key: 'smoke_skill',
-  label: 'Smoke skill',
-  description: 'Smoke skill',
-  scope: 'personal',
-  targetChatId: null,
-  enabled: true,
-  source: 'user',
-  evidence: 'Smoke check',
-  createdAt: now,
   updatedAt: now,
 };
 const pin: WorkbenchPin = {
@@ -210,7 +195,6 @@ await mutateData((data) => {
   data.artifacts.push(artifact);
   data.handoffs.push(handoff);
   data.profiles.push(profile);
-  data.userSkills.push(skill);
   data.workbenchPins.push(pin);
   data.turns.push(turn);
   data.missions.push(mission);

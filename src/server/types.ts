@@ -270,23 +270,10 @@ export type UserProfile = {
   updatedAt: string;
 };
 
+// Retained for WorkingStyleSnapshot: profile default skills and stored turn
+// snapshots still carry a source/scope even though the skills panel is gone.
 export type UserSkillSource = 'user' | 'observed' | 'workspace' | 'recommended';
 export type UserSkillScope = 'personal' | 'workspace' | 'mission';
-
-export type UserSkill = {
-  id: string;
-  userId: string;
-  key: string;
-  label: string;
-  description: string;
-  source: UserSkillSource;
-  scope: UserSkillScope;
-  targetChatId: string | null;
-  enabled: boolean;
-  evidence: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
 
 export type WorkingStyleSnapshot = {
   skills: Array<{

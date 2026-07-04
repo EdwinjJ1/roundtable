@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createChat } from '../src/server/actions/chat-actions.js';
-import { pinWorkbench } from '../src/server/actions/memory-actions.js';
-import { setUserSkillEnabled, upsertUserSkill } from '../src/server/actions/skill-actions.js';
+import { pinWorkbench, updateUserProfile } from '../src/server/actions/memory-actions.js';
+import { getWorkingStyleSnapshot } from '../src/server/actions/skill-actions.js';
 import { createTurn } from '../src/server/actions/turn-actions.js';
 import { createWorkbench } from '../src/server/actions/workbench-actions.js';
 import { resetData } from '../src/server/store.js';
@@ -33,8 +33,8 @@ afterEach(async () => {
   await rm(tempDir, { recursive: true, force: true });
 });
 
-describe('User skills', () => {
-  it('injects enabled skills and workbench rules into planned turns', async () => {
+describe('Working style pipe (profile skills + workbench pins)', () => {
+  it('injects profile default skills and workbench rules into planned turns', async () => {
     const workbench = await createWorkbench(actor, {
       name: 'Skills test',
       workspacePath: 'workspaces/skills-test',
@@ -43,22 +43,8 @@ describe('User skills', () => {
       workbenchId: workbench.id,
       title: 'Build settings',
     });
-    await upsertUserSkill(actor, {
-      key: 'plan_before_implementation',
-      source: 'observed',
-      evidence: 'User wants a plan before changes.',
-    });
-    await setUserSkillEnabled(actor, {
-      key: 'plan_before_implementation',
-      enabled: false,
-    });
-    const updatedSkill = await upsertUserSkill(actor, {
-      key: 'plan_before_implementation',
-      evidence: 'Updated evidence should not override disabled state.',
-    });
-    await setUserSkillEnabled(actor, {
-      key: 'plan_before_implementation',
-      enabled: true,
+    await updateUserProfile(actor, {
+      defaultSkills: ['plan_before_implementation'],
     });
     await pinWorkbench(actor, {
       workbenchId: workbench.id,
@@ -71,7 +57,6 @@ describe('User skills', () => {
       message: 'Build a profile settings UI and review it.',
     });
 
-    expect(updatedSkill.enabled).toBe(false);
     expect(turn.mission?.workingStyle.skills.map((skill) => skill.key)).toContain('plan_before_implementation');
     expect(turn.mission?.workingStyle.projectRules).toContain('Show visual approval before marking UI work done.');
     expect(turn.plan.tasks[0]?.brief).toContain('Plan before implementation');
@@ -80,41 +65,37 @@ describe('User skills', () => {
       .toContain('Show visual approval before marking UI work done.');
   });
 
-  it('only injects mission-scoped skills into the targeted chat', async () => {
-    const workbench = await createWorkbench(actor, {
-      name: 'Mission skill test',
-      workspacePath: 'workspaces/mission-skill-test',
+  it('scopes pin-derived project rules to the pinned workbench', async () => {
+    const pinned = await createWorkbench(actor, {
+      name: 'Pinned bench',
+      workspacePath: 'workspaces/pinned-bench',
     });
-    const targetChat = await createChat(actor, {
-      workbenchId: workbench.id,
-      title: 'Target mission',
+    const other = await createWorkbench(actor, {
+      name: 'Other bench',
+      workspacePath: 'workspaces/other-bench',
     });
-    const otherChat = await createChat(actor, {
-      workbenchId: workbench.id,
-      title: 'Other mission',
-    });
-    const missionSkill = await upsertUserSkill(actor, {
-      key: 'visual_approval_required',
-      scope: 'mission',
-      targetChatId: targetChat.id,
-      source: 'recommended',
-      evidence: 'Enabled from the recommended mission section.',
+    const pinnedChat = await createChat(actor, { workbenchId: pinned.id, title: 'Pinned chat' });
+    const otherChat = await createChat(actor, { workbenchId: other.id, title: 'Other chat' });
+    await pinWorkbench(actor, {
+      workbenchId: pinned.id,
+      content: 'Always answer in Chinese.',
     });
 
-    const targetTurn = await createTurn({
-      actor,
-      chatId: targetChat.id,
-      message: 'Build a polished landing page UI.',
-    });
-    const otherTurn = await createTurn({
-      actor,
-      chatId: otherChat.id,
-      message: 'Build a polished landing page UI.',
-    });
+    const pinnedStyle = await getWorkingStyleSnapshot(actor, pinnedChat.id);
+    const otherStyle = await getWorkingStyleSnapshot(actor, otherChat.id);
 
-    expect(missionSkill.scope).toBe('mission');
-    expect(missionSkill.targetChatId).toBe(targetChat.id);
-    expect(targetTurn.mission?.workingStyle.skills.map((skill) => skill.key)).toContain('visual_approval_required');
-    expect(otherTurn.mission?.workingStyle.skills.map((skill) => skill.key)).not.toContain('visual_approval_required');
+    expect(pinnedStyle.projectRules).toContain('Always answer in Chinese.');
+    expect(otherStyle.projectRules).toHaveLength(0);
+  });
+
+  it('normalizes free-form profile skills and falls back to a generated label', async () => {
+    await updateUserProfile(actor, {
+      defaultSkills: ['Reply In Chinese!', 'verify_before_push', 'verify before push'],
+    });
+    const style = await getWorkingStyleSnapshot(actor, null);
+    expect(style.skills.map((skill) => skill.key)).toEqual(['reply_in_chinese', 'verify_before_push']);
+    expect(style.skills[0]?.label).toBe('Reply In Chinese');
+    // Catalog keys keep their curated descriptions.
+    expect(style.skills[1]?.description).toContain('typecheck');
   });
 });

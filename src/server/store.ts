@@ -15,7 +15,6 @@ import type {
   Mission,
   RoundtableSettings,
   UserProfile,
-  UserSkill,
   Workbench,
   WorkbenchPin,
 } from './types.js';
@@ -29,7 +28,6 @@ export type RoundtableData = {
   artifacts: Artifact[];
   handoffs: Handoff[];
   profiles: UserProfile[];
-  userSkills: UserSkill[];
   workbenchPins: WorkbenchPin[];
   turns: LocalTurn[];
   missions: Mission[];
@@ -600,26 +598,6 @@ const NORMALIZED_TABLE_SPECS = [
     orderBy: 'user_id ASC',
     columns: [{ name: 'record_updated_at', value: (row) => row.updatedAt }],
   }),
-  makeTableSpec<UserSkill>({
-    table: 'roundtable_user_skills',
-    idColumn: 'id',
-    rows: (data) => data.userSkills,
-    assign: (data, rows) => {
-      data.userSkills = rows;
-    },
-    id: (row) => row.id,
-    orderBy: 'created_at ASC, id ASC',
-    columns: [
-      { name: 'user_id', value: (row) => row.userId },
-      { name: 'key', value: (row) => row.key },
-      { name: 'scope', value: (row) => row.scope },
-      { name: 'target_chat_id', value: (row) => row.targetChatId },
-      { name: 'enabled', value: (row) => row.enabled },
-      { name: 'source', value: (row) => row.source },
-      { name: 'created_at', value: (row) => row.createdAt },
-      { name: 'record_updated_at', value: (row) => row.updatedAt },
-    ],
-  }),
   makeTableSpec<WorkbenchPin>({
     table: 'roundtable_workbench_pins',
     idColumn: 'id',
@@ -885,7 +863,6 @@ function emptyData(): RoundtableData {
     artifacts: [],
     handoffs: [],
     profiles: [],
-    userSkills: [],
     workbenchPins: [],
     turns: [],
     missions: [],
@@ -906,7 +883,6 @@ function normalizeData(raw: Partial<RoundtableData>): RoundtableData {
     artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : [],
     handoffs: Array.isArray(raw.handoffs) ? raw.handoffs : [],
     profiles: Array.isArray(raw.profiles) ? raw.profiles : [],
-    userSkills: Array.isArray(raw.userSkills) ? raw.userSkills : [],
     workbenchPins: Array.isArray(raw.workbenchPins) ? raw.workbenchPins : [],
     turns: Array.isArray(raw.turns) ? raw.turns : [],
     missions: Array.isArray(raw.missions) ? raw.missions : [],
