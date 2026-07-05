@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createChat } from '../src/server/actions/chat-actions.js';
 import {
   answerClarification,
@@ -38,6 +38,10 @@ afterEach(async () => {
   delete process.env.ROUNDTABLE_MAX_FIX_ROUNDS;
   delete process.env.ROUNDTABLE_SAFETY_ENABLED;
   delete process.env.ROUNDTABLE_CLARIFY_ENABLED;
+  delete process.env.ROUNDTABLE_OPENAI_API_KEY;
+  delete process.env.ROUNDTABLE_OPENAI_BASE_URL;
+  delete process.env.ROUNDTABLE_OPENAI_MODEL;
+  vi.restoreAllMocks();
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -141,6 +145,7 @@ describe('dispatchTurn — DAG scheduler integration', () => {
   });
 
   it('does not keep final delivery blocked after a fixer repairs a blocking review', async () => {
+    configureOpenAICompatOutput('Looks good -- no blockers');
     await configureRuntimeOutput('orchestrator', 'Looks good -- no blockers');
     await configureRuntimeOutput('nova', 'Architecture is solid -- no blockers');
     await configureRuntimeOutput('atlas', 'Looks good -- no blockers');
@@ -254,6 +259,16 @@ describe('dispatchTurn — DAG scheduler integration', () => {
     })).rejects.toMatchObject({ code: 'turn_not_found', status: 404 });
   });
 });
+
+function configureOpenAICompatOutput(text: string): void {
+  process.env.ROUNDTABLE_OPENAI_API_KEY = 'test-key';
+  process.env.ROUNDTABLE_OPENAI_BASE_URL = 'https://example.test/v1';
+  process.env.ROUNDTABLE_OPENAI_MODEL = 'deepseek-test';
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    choices: [{ message: { content: text }, finish_reason: 'stop' }],
+    usage: {},
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+}
 
 async function configureRuntimeOutput(agentId: string, text: string): Promise<void> {
   await saveAgentRuntimeConfig({

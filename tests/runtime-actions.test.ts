@@ -150,7 +150,7 @@ describe('CLI runtime runner', () => {
       ]),
       workspace: tempDir,
       prompt: 'ignored prompt',
-      idleTimeoutMs: 80,
+      idleTimeoutMs: 180,
     });
 
     expect(result.ok).toBe(false);

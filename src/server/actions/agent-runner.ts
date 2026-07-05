@@ -462,8 +462,8 @@ async function runMiniMaxTask(input: {
 }
 
 // Runs the task against the configured OpenAI-compatible model. Throws
-// OpenAICompatUnavailableError (from runOnOpenAICompat) when unconfigured — the
-// dispatch layer catches it and falls back to local-dispatch.
+// OpenAICompatUnavailableError (from runOnOpenAICompat) when unconfigured; the
+// dispatch layer decides whether that route may fall back.
 async function runOpenAICompatTask(input: {
   workspace: string;
   task: PlanTask;
