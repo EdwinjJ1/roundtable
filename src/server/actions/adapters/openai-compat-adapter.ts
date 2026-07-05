@@ -10,8 +10,8 @@
      ROUNDTABLE_OPENAI_API_KEY    the bearer token
 
    Like the other real adapters this is opt-in and never a silent fallback: with
-   no key it throws OpenAICompatUnavailableError, which the dispatch layer catches
-   to fall back to local-dispatch (surfaced on the task, not hidden).
+   no key it throws OpenAICompatUnavailableError, and the caller decides whether
+   that route may fall back.
 
    Reasoning models (DeepSeek V4, MiniMax M-series, …) return the final answer in
    the standard `content` field and keep chain-of-thought in `reasoning_content`;
