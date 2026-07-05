@@ -25,6 +25,7 @@ import { resolveDefaultAgentAdapter } from '../settings-actions.js';
 import { artifactsFromRun, finalReportArtifact, reviewerSummaryArtifact, upsertArtifacts } from './artifacts.js';
 import { ActionError } from './errors.js';
 import {
+  isReviewGateTask,
   makeFixerTask,
   maxFixRounds,
   repairedTargetArtifact,
@@ -225,7 +226,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     let result;
     let fallbackNote: AgentEvent | null = null;
     try {
-      result = await runAgentTask({ adapter, workspace, task: effectiveTask, message: turn.message, turnId: turn.id, handoffContext, runtimeEnv });
+      result = await runAgentTask({ adapter, workspace, task: effectiveTask, message: turn.message, turnId: turn.id, chatId: turn.localChatId, handoffContext, runtimeEnv });
     } catch (error) {
       // Opt-in adapter unavailable (E2B / MiniMax / OpenAI-compatible): fall back
       // to local-dispatch in this layer (not silently inside the adapter). The
@@ -240,7 +241,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
           type: 'thinking_delta',
           delta: `${error.name} (${error.message}); fell back to local-dispatch.`,
         };
-        result = await runAgentTask({ adapter: 'local-dispatch', workspace, task: effectiveTask, message: turn.message, turnId: turn.id, handoffContext, runtimeEnv });
+        result = await runAgentTask({ adapter: 'local-dispatch', workspace, task: effectiveTask, message: turn.message, turnId: turn.id, chatId: turn.localChatId, handoffContext, runtimeEnv });
       } else {
         throw error;
       }
@@ -297,7 +298,9 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     // trigger a fix, not silently end the run. Treat such a review as a failure
     // so the scheduler derives a fixer via onFailure (bounded by maxFixRounds);
     // the fixer receives this review as its repair context. A clean review passes.
-    if (task.role === 'reviewer' && reviewRequestsFix()) {
+    // The architect's post-build check (role architect, review stage) gates the
+    // same way: blocking architecture findings get a fix round too.
+    if (isReviewGateTask(task) && reviewRequestsFix()) {
       const severities = reviewSeverities(result.text);
       if (severities.blocking > 0) {
         return {
@@ -322,14 +325,24 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   const schedulerToStage = { running: 'running', completed: 'done', failed: 'failed', blocked: 'blocked' } as const;
   const onTaskState = async (taskId: string, status: 'running' | 'completed' | 'failed' | 'blocked') => {
     const derived = derivedById.get(taskId);
+    // Persist this task's artifacts as soon as it reaches a terminal state — not
+    // only at the end-of-run fold. An interrupted or crashed run must not lose
+    // the work of tasks that already finished (their files exist in the
+    // workspace but would otherwise never be registered).
+    const taskArtifacts = status === 'completed' || status === 'failed'
+      ? allArtifactsByTask.get(taskId) ?? []
+      : [];
     await updateTurn(turn.id, (current) => {
       const planHasTask = current.plan.tasks.some((task) => task.id === taskId);
       const tasks = derived && !planHasTask
         ? [...current.plan.tasks, derived]
         : current.plan.tasks;
+      const artifacts = [...current.artifacts];
+      upsertArtifacts(artifacts, taskArtifacts);
       return {
         ...current,
         plan: { ...current.plan, tasks },
+        artifacts,
         dispatchStage: status === 'running' ? `running:${taskId}` : current.dispatchStage,
         workflowRun: {
           ...(current.workflowRun ?? { activeStageId: null, stageStates: {}, taskStates: {} }),
@@ -347,6 +360,11 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
         },
       };
     }, input);
+    if (taskArtifacts.length > 0 && turn.localChatId) {
+      await mutateData((data) => {
+        upsertArtifacts(data.artifacts, taskArtifacts);
+      });
+    }
     const current = await getTurn(turn.id, input);
     if (current) {
       const mission = await updateMissionForDispatch(current);
@@ -400,6 +418,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     error: record.error,
     ...(record.producedFor !== undefined ? { producedFor: record.producedFor } : {}),
     ...(record.fixRound !== undefined ? { fixRound: record.fixRound } : {}),
+    artifactIds: (allArtifactsByTask.get(record.taskId) ?? []).map((artifact) => artifact.id),
   }));
 
   // Fold every task's artifacts together with replace-by-identity semantics:

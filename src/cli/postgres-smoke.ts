@@ -10,7 +10,6 @@ import type {
   Message,
   Mission,
   UserProfile,
-  UserSkill,
   Workbench,
   WorkbenchPin,
 } from '../server/types.js';
@@ -86,20 +85,6 @@ const profile: UserProfile = {
   notes: 'Smoke profile notes',
   updatedAt: now,
 };
-const skill: UserSkill = {
-  id: id('skill'),
-  userId: marker.id,
-  key: 'smoke_skill',
-  label: 'Smoke skill',
-  description: 'Smoke skill',
-  scope: 'personal',
-  targetChatId: null,
-  enabled: true,
-  source: 'user',
-  evidence: 'Smoke check',
-  createdAt: now,
-  updatedAt: now,
-};
 const pin: WorkbenchPin = {
   id: id('pin'),
   userId: marker.id,
@@ -171,7 +156,7 @@ const mission: Mission = {
 
 const runtimeConfig: AgentRuntimeConfig = {
   agentId: 'atlas',
-  runtime: 'custom-cli',
+  runtime: 'claude-code',
   command: 'echo',
   args: ['smoke'],
   env: {},
@@ -185,7 +170,7 @@ const runtimeConversation: AgentRuntimeConversation = {
   id: id('conv'),
   agentId: 'atlas',
   role: 'implementer',
-  runtime: 'custom-cli',
+  runtime: 'claude-code',
   title: 'Smoke conversation',
   turnId: turn.id,
   taskId: id('task'),
@@ -210,7 +195,6 @@ await mutateData((data) => {
   data.artifacts.push(artifact);
   data.handoffs.push(handoff);
   data.profiles.push(profile);
-  data.userSkills.push(skill);
   data.workbenchPins.push(pin);
   data.turns.push(turn);
   data.missions.push(mission);
@@ -227,7 +211,7 @@ if (!data.chats.some((item) => item.id === chat.id)) throw new Error('Chat marke
 if (!data.artifacts.some((item) => item.id === artifact.id && item.chatId.startsWith('local-'))) {
   throw new Error('Local artifact marker was not persisted.');
 }
-if (!data.agentRuntimeConfigs.some((item) => item.agentId === runtimeConfig.agentId && item.runtime === 'custom-cli')) {
+if (!data.agentRuntimeConfigs.some((item) => item.agentId === runtimeConfig.agentId && item.runtime === 'claude-code')) {
   throw new Error('Agent runtime config marker was not persisted.');
 }
 if (!data.agentRuntimeConversations.some((item) => item.id === runtimeConversation.id && item.transcript.length === 1)) {

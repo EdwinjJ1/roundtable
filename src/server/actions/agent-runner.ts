@@ -10,6 +10,12 @@ import { OpenAICompatUnavailableError, resolvedOpenAICompatModel, runOnOpenAICom
 import { configuredRuntimeForAgent, mergedRuntimeConfigForAgent } from './cli-runtimes/registry.js';
 import { executeCliRuntime } from './cli-runtimes/runner.js';
 import {
+  clearCliSession,
+  cliSessionFor,
+  runtimeSupportsResume,
+  saveCliSession,
+} from './cli-runtimes/sessions.js';
+import {
   createRuntimeConversation,
   finishRuntimeConversation,
   runtimeConversationCallbacks,
@@ -35,6 +41,9 @@ export async function runAgentTask(input: {
   task: PlanTask;
   message: string;
   turnId?: string | undefined;
+  // Chat the turn belongs to: the scope for CLI session reuse, so consecutive
+  // turns in one chat resume the same CLI conversation.
+  chatId?: string | null | undefined;
   handoffContext?: string | undefined;
   runtimeEnv?: NodeJS.ProcessEnv | undefined;
 }): Promise<AgentRunResult> {
@@ -115,6 +124,7 @@ async function runAgentCliTask(input: {
   task: PlanTask;
   message: string;
   turnId?: string | undefined;
+  chatId?: string | null | undefined;
   handoffContext?: string | undefined;
   runtimeEnv?: NodeJS.ProcessEnv | undefined;
 }): Promise<AgentRunResult> {
@@ -159,7 +169,14 @@ async function runAgentCliTask(input: {
     // Small backdate so a file the CLI writes in the same tick as the spawn is
     // never missed by the post-run mtime scan.
     const startedMs = Date.now() - 2_000;
-    const result = await executeCliRuntime({
+    // Session continuity: resume the chat's stored CLI session for this agent
+    // so the model keeps its conversation memory across turns. Scope state
+    // (router HOME/port) by chat, falling back to turn for chat-less runs.
+    const sessionScope = input.chatId ?? input.turnId ?? input.task.id;
+    const storedSession = runtimeSupportsResume(runtime)
+      ? await cliSessionFor(input.workspace, runtime, agent.id)
+      : null;
+    const runOnce = (resumeSessionId: string | undefined) => executeCliRuntime({
       conversationId: conversation.id,
       runtime,
       agent,
@@ -167,10 +184,28 @@ async function runAgentCliTask(input: {
       workspace: input.workspace,
       prompt,
       timeoutMs: timeoutMs(),
+      idleTimeoutMs: idleTimeoutMs(),
       envSnapshot: runtimeEnv,
       callbacks: runtimeConversationCallbacks(conversation.id),
+      resumeSessionId,
+      sessionScopeId: sessionScope,
     });
+    let result = await runOnce(storedSession ?? undefined);
+    let staleSessionNote: AgentEvent | null = null;
+    // A stored session can expire or vanish (CLI state cleaned, HOME moved). A
+    // failed resume must not brick the chat: drop it and retry cold once.
+    if (!result.ok && storedSession) {
+      await clearCliSession(input.workspace, runtime, agent.id);
+      staleSessionNote = {
+        type: 'thinking_delta',
+        delta: `Resuming CLI session ${storedSession} failed; retried with a fresh session.`,
+      };
+      result = await runOnce(undefined);
+    }
     const ok = result.ok;
+    if (ok && result.sessionId) {
+      await saveCliSession(input.workspace, runtime, agent.id, result.sessionId);
+    }
     const text = ok
       ? result.text
       : `# ${input.task.title}\n\n${runtime} did not produce a usable result.\n\n${result.text}`;
@@ -178,7 +213,7 @@ async function runAgentCliTask(input: {
     const scan = ok
       ? await collectChangedWorkspaceFiles(input.workspace, startedMs)
       : { files: [], skipped: [] };
-    await finishRuntimeConversation(conversation.id, ok ? 'completed' : 'failed', result.error);
+    await finishRuntimeConversation(conversation.id, ok ? 'completed' : 'failed', result.error, result.sessionId);
     return {
       text,
       path,
@@ -188,6 +223,7 @@ async function runAgentCliTask(input: {
       files: scan.files,
       events: [
         ...started,
+        ...(staleSessionNote ? [staleSessionNote] : []),
         {
           type: 'tool_result',
           id: toolId,
@@ -670,6 +706,34 @@ function commandArgs(prompt: string, agent: AgentProfile): string[] {
   return ['-p', prompt, '--permission-mode', 'bypassPermissions'];
 }
 
+// The architect's standing mandate — the same principles govern both the
+// upfront design pass and the post-build architecture check.
+const ARCHITECT_PRINCIPLES = [
+  'Architecture principles you enforce:',
+  '1. Software-engineering discipline: SOLID, separation of concerns, DRY, KISS. Prefer boring, proven patterns over clever ones.',
+  '2. Modularity: small cohesive modules with clear boundaries and single responsibilities; no god-files. Organize by feature/domain.',
+  '3. No hardcoding: magic numbers, inline URLs/keys, duplicated string literals, and copy-pasted logic must be routed through named constants, configuration, or shared utilities.',
+  '4. Built for what comes next: design so future features extend the system instead of rewriting it — reuse existing modules wherever possible, and make the seams for extension explicit.',
+].join('\n');
+
+// Design (plan stage) and the post-build check (review stage) are different
+// jobs: the first produces the blueprint the implementer follows, the second
+// audits the implementation against it and gates delivery.
+function architectInstruction(task: PlanTask): string {
+  if ((task.stageKind ?? task.stageId) === 'review') {
+    return 'Audit the implemented code against the architecture principles below. '
+      + 'Verify modular structure (small cohesive files, clear boundaries), flag every hardcoded value and every piece of '
+      + 'copy-pasted logic that should be extracted into a shared module, and confirm the structure supports future extension. '
+      + 'Report concrete findings with severity labels (Critical/High/Medium) and file references. Do NOT rewrite the code '
+      + 'yourself — a fixer applies your findings. If the architecture is solid, say so explicitly.';
+  }
+  return 'Design the technical architecture BEFORE any code is written: module boundaries, file/folder structure, '
+    + 'data contracts and interfaces, naming conventions, and the dependency order of the work. Map which existing code '
+    + 'or modules should be reused instead of rewritten. Write the architecture document to a file the implementer can '
+    + 'follow directly (e.g. docs/architecture.md in the workspace), and keep it concrete: name the files to create and '
+    + 'what belongs in each. Do NOT implement the product itself.';
+}
+
 function agentPrompt(agent: AgentProfile, input: { task: PlanTask; message: string; handoffContext?: string | undefined }): string {
   const roleInstruction = input.task.stageId === 'answer'
     ? 'Answer the user\'s question directly, using the files in this workspace as reference. '
@@ -677,8 +741,10 @@ function agentPrompt(agent: AgentProfile, input: { task: PlanTask; message: stri
     : {
         planner: 'Create the initial breakdown and routing. Do not implement unless the task explicitly asks only for planning.',
         pm: 'Clarify product intent, constraints, acceptance criteria, and sequencing.',
-        architect: 'Design the technical approach, interfaces, risks, and dependency order.',
-        implementer: 'Modify the project files needed to complete your assigned slice.',
+        architect: architectInstruction(input.task),
+        implementer: 'Modify the project files needed to complete your assigned slice. '
+          + 'Follow the architecture document from the previous agent output if one is provided: respect its module '
+          + 'boundaries and file structure, reuse the modules it maps out, and keep values configurable instead of hardcoded.',
         reviewer: 'Review the current project state and report concrete issues, risks, and missing tests.',
         fixer: 'Apply focused fixes for known issues and summarize changed files.',
       }[agent.role];
@@ -688,6 +754,7 @@ function agentPrompt(agent: AgentProfile, input: { task: PlanTask; message: stri
     `Agent: ${agent.displayName} (${agent.id})`,
     `Role: ${agent.role}`,
     `Instruction: ${roleInstruction}`,
+    ...(agent.role === 'architect' ? [ARCHITECT_PRINCIPLES] : []),
     `Task: ${input.task.title}`,
     `Brief: ${input.task.brief}`,
     `Original user request: ${input.message}`,
@@ -714,7 +781,9 @@ function chatAgentPrompt(
     : {
     planner: 'Map the goal into a practical next-step plan. Keep it useful and concise.',
     pm: 'Clarify product intent, constraints, acceptance criteria, and sequencing.',
-    architect: 'Describe a workable technical approach, key interfaces, risks, and tradeoffs.',
+    architect: (input.task.stageKind ?? input.task.stageId) === 'review'
+      ? 'Audit the upstream implementation for software-engineering discipline: modularity, no hardcoded values, reusable structure. Report findings with Critical/High/Medium labels; if it is solid, say so explicitly.'
+      : 'Design the architecture the implementer should follow: module boundaries, file structure, data contracts, naming, and what existing code to reuse. No hardcoded values — name the constants/config instead.',
     implementer: isHtml
       ? 'Produce a usable HTML artifact. Prefer concise, complete HTML with head and body content; choose the structure and visual approach that best fits the task.'
       : 'Produce the useful deliverable content directly. Choose Markdown, code, or structured notes as appropriate.',
@@ -744,6 +813,11 @@ function splitArgs(raw: string): string[] {
 function timeoutMs(): number | undefined {
   const parsed = Number(process.env.ROUNDTABLE_AGENT_TIMEOUT_MS);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function idleTimeoutMs(): number | undefined {
+  const parsed = Number(process.env.ROUNDTABLE_AGENT_IDLE_TIMEOUT_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30 * 60 * 1000;
 }
 
 // Optional output ceiling for chat model deliverables. Unset by default: the

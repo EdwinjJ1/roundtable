@@ -47,8 +47,8 @@ afterEach(async () => {
 });
 
 describe('Mission P0 migration', () => {
-  it('exposes typed built-in workflow templates for the backend', () => {
-    const templates = listWorkflowTemplates();
+  it('exposes typed built-in workflow templates for the backend', async () => {
+    const templates = await listWorkflowTemplates();
     expect(templates.map((template) => template.id)).toContain('wf-feature-builder');
     const featureBuilder = templates.find((template) => template.id === 'wf-feature-builder');
     expect(featureBuilder?.stages.map((stage) => stage.id)).toEqual([

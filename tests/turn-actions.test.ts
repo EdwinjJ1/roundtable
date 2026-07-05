@@ -142,6 +142,7 @@ describe('dispatchTurn — DAG scheduler integration', () => {
 
   it('does not keep final delivery blocked after a fixer repairs a blocking review', async () => {
     await configureRuntimeOutput('orchestrator', 'Looks good -- no blockers');
+    await configureRuntimeOutput('nova', 'Architecture is solid -- no blockers');
     await configureRuntimeOutput('atlas', 'Looks good -- no blockers');
     await configureRuntimeOutput('vera', 'Critical: generated page is missing the checkout confirmation');
     await configureRuntimeOutput('fixer', 'Fixed checkout confirmation and verified the repair');
@@ -167,7 +168,9 @@ describe('dispatchTurn — DAG scheduler integration', () => {
     expect(result.mission?.finalDelivery.recommendation).toBe('accept');
     expect(JSON.parse(result.artifacts.find((artifact) => artifact.id === `review_summary_${turn.id}`)?.preview ?? '{}')?.risks)
       .toEqual([]);
-  });
+    // Spawns one node fixture per task (6 with the architect bracket + fixer);
+    // under full-suite CPU contention the default 5s budget flakes.
+  }, 30_000);
 
   it('parks a vague request for clarification, then plans after the user answers', async () => {
     // Enable the clarify gate for this case (heuristic path, no model key).
@@ -219,7 +222,7 @@ describe('dispatchTurn — DAG scheduler integration', () => {
     const activity = listed?.liveActivity?.[atlasTaskId];
 
     expect(activity).toBeDefined();
-    expect(activity).toMatchObject({ agentId: 'atlas', runtime: 'custom-cli', status: 'completed' });
+    expect(activity).toMatchObject({ agentId: 'atlas', runtime: 'claude-code', status: 'completed' });
     expect(activity?.transcript.some((entry) => entry.kind === 'response' || entry.kind === 'thinking')).toBe(true);
     // The stored turn itself stays lean: live activity is a response-time view.
     expect((await getTurn(turn.id))).not.toHaveProperty('liveActivity');
@@ -255,7 +258,7 @@ describe('dispatchTurn — DAG scheduler integration', () => {
 async function configureRuntimeOutput(agentId: string, text: string): Promise<void> {
   await saveAgentRuntimeConfig({
     agentId,
-    runtime: 'custom-cli',
+    runtime: 'claude-code',
     command: process.execPath,
     args: ['-e', `process.stdout.write(${JSON.stringify(text)})`],
   });

@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import type { AgentEvent, AgentRuntimeConfig, AgentRuntimeKind, ModelProviderKind } from '../../types.js';
 import { defaultConfiguredModelProvider, resolveModelProvider } from '../settings-actions.js';
 import type { AgentProfile } from '../agent-roster.js';
-import { envKey, runtimeDefinition } from './registry.js';
+import { runtimeDefinition } from './registry.js';
 import { assertRuntimeReady, resolveRuntimeCommand, runtimeEnvName } from './probe.js';
 
 export type RuntimeExecutionResult = {
@@ -14,6 +14,10 @@ export type RuntimeExecutionResult = {
   command: string;
   pid: number | null;
   events: AgentEvent[];
+  // CLI-native session id captured from the runtime's structured output
+  // (claude session_id, codex thread_id, opencode sessionID). Lets the next
+  // task in the same chat resume the conversation instead of starting cold.
+  sessionId: string | null;
 };
 
 export type RuntimeExecutionCallbacks = {
@@ -34,11 +38,22 @@ export type RuntimeExecutionInput = {
   workspace: string;
   prompt: string;
   timeoutMs?: number | undefined;
+  // Kill the runtime only when it has produced no stdout/stderr activity for
+  // this long. This is distinct from timeoutMs, which is a total runtime cap.
+  idleTimeoutMs?: number | undefined;
   envSnapshot?: NodeJS.ProcessEnv | undefined;
   callbacks?: RuntimeExecutionCallbacks | undefined;
+  // Resume a previous CLI session (claude-code / claude-code-router) so the
+  // agent keeps its conversation memory across turns in the same chat.
+  resumeSessionId?: string | undefined;
+  // Stable identity for session-affine state (the claude-code-router HOME and
+  // port). Defaults to conversationId, which is per-task; pass the chat id so
+  // consecutive tasks in a chat share the router instance and session store.
+  sessionScopeId?: string | undefined;
 };
 
 const activeProcesses = new Map<string, ChildProcessWithoutNullStreams>();
+const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function stopActiveRuntimeConversation(conversationId: string): boolean {
   const child = activeProcesses.get(conversationId);
@@ -54,7 +69,7 @@ export async function executeCliRuntime(input: RuntimeExecutionInput): Promise<R
   const events: AgentEvent[] = [];
   let stdout = '';
   let stderr = '';
-  let timedOut = false;
+  let timeoutReason: 'total' | 'idle' | null = null;
   const parser = parserForRuntime(input.runtime);
 
   const started: AgentEvent = {
@@ -78,8 +93,18 @@ export async function executeCliRuntime(input: RuntimeExecutionInput): Promise<R
     windowsHide: true,
   });
   activeProcesses.set(input.conversationId, child);
-  await input.callbacks?.onCommand?.(commandSpec.display, child.pid ?? null);
 
+  // Observe the exit BEFORE any await: a command that crashes in milliseconds
+  // would otherwise emit 'close' while onCommand persistence is still in
+  // flight, and a listener attached after the fact never fires — the run then
+  // hangs as "running" forever.
+  const exited = new Promise<number>((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (code) => resolve(code ?? 1));
+  });
+  // The child may already be dead when stdin flushes; without a handler the
+  // resulting EPIPE surfaces as an uncaught stream error.
+  child.stdin.on('error', () => {});
   if (commandSpec.stdin !== null) {
     child.stdin.write(commandSpec.stdin, 'utf8');
   }
@@ -90,38 +115,51 @@ export async function executeCliRuntime(input: RuntimeExecutionInput): Promise<R
 
   let pending = Promise.resolve();
   child.stdout.on('data', (chunk: string) => {
+    markActivity();
     stdout += chunk;
     pending = pending.then(() => parser.push(chunk, emit));
   });
   child.stderr.on('data', (chunk: string) => {
+    markActivity();
     stderr += chunk;
   });
 
-  const timer = input.timeoutMs
+  const totalTimer = input.timeoutMs
     ? setTimeout(() => {
-        timedOut = true;
+        timeoutReason ??= 'total';
         killProcess(child);
       }, input.timeoutMs)
     : null;
+  const idleTimeoutMs = input.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  let idleTimer = idleTimeoutMs > 0
+    ? setTimeout(() => {
+        timeoutReason ??= 'idle';
+        killProcess(child);
+      }, idleTimeoutMs)
+    : null;
 
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    child.on('error', reject);
-    child.on('close', (code) => resolve(code ?? 1));
-  });
-  if (timer) clearTimeout(timer);
+  await input.callbacks?.onCommand?.(commandSpec.display, child.pid ?? null);
+
+  const exitCode = await exited;
+  if (totalTimer) clearTimeout(totalTimer);
+  if (idleTimer) clearTimeout(idleTimer);
   activeProcesses.delete(input.conversationId);
   await pending;
   await parser.flush(emit);
 
   const parsedText = parser.text().trim() || stdout.trim() || stderr.trim();
-  const ok = !timedOut && exitCode === 0 && parsedText.length > 0;
+  const ok = !timeoutReason && exitCode === 0 && parsedText.length > 0;
   // On failure the interesting detail is usually on stderr (e.g. "Service
   // startup timeout" from ccr) while stdout only has a banner — keep both.
   const failureText = [parsedText, stderr.trim()]
     .filter((part, index, parts) => part.length > 0 && parts.indexOf(part) === index)
     .join('\n\n');
   const finalText = ok ? parsedText : failureText || parsedText;
-  const error = timedOut ? 'runtime_timeout' : ok ? null : `runtime_exit_${exitCode}`;
+  const error = timeoutReason === 'total'
+    ? 'runtime_timeout'
+    : timeoutReason === 'idle'
+      ? 'runtime_idle_timeout'
+      : ok ? null : `runtime_exit_${exitCode}`;
   const errorDetail = error === null ? null : [error, stderrSummary(stderr)].filter(Boolean).join(': ');
   const terminal: AgentEvent = ok
     ? { type: 'done', finishReason: 'completed' }
@@ -137,11 +175,22 @@ export async function executeCliRuntime(input: RuntimeExecutionInput): Promise<R
     command: commandSpec.display,
     pid: child.pid ?? null,
     events,
+    sessionId: parser.sessionId(),
   };
 
   async function emit(event: AgentEvent, transcript?: RuntimeTranscriptEntry): Promise<void> {
     events.push(event);
+    if (transcript) markActivity();
     await input.callbacks?.onEvent?.(event, transcript);
+  }
+
+  function markActivity(): void {
+    if (!idleTimer || idleTimeoutMs <= 0) return;
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      timeoutReason ??= 'idle';
+      killProcess(child);
+    }, idleTimeoutMs);
   }
 }
 
@@ -156,7 +205,6 @@ type CommandSpec = {
 async function commandForRuntime(input: RuntimeExecutionInput): Promise<CommandSpec> {
   const runtimeEnv = input.envSnapshot ?? process.env;
   const env = await buildRuntimeEnv(input.runtime, input.config, runtimeEnv);
-  if (input.runtime === 'custom-cli') return customCommand(input, env);
 
   const command = input.config?.command
     || runtimeEnv[`ROUNDTABLE_${runtimeEnvName(input.runtime)}_COMMAND`]
@@ -204,28 +252,7 @@ async function commandForRuntime(input: RuntimeExecutionInput): Promise<CommandS
     return commandSpec(resolvedCommand, args, input.prompt, env);
   }
 
-  return customCommand(input, env);
-}
-
-function customCommand(input: RuntimeExecutionInput, env: NodeJS.ProcessEnv): CommandSpec {
-  const runtimeEnv = input.envSnapshot ?? process.env;
-  const command = input.config?.command
-    || runtimeEnv[`ROUNDTABLE_AGENT_COMMAND_${envKey(input.agent.id)}`]
-    || runtimeEnv[`ROUNDTABLE_AGENT_COMMAND_${envKey(input.agent.role)}`]
-    || runtimeEnv.ROUNDTABLE_AGENT_COMMAND
-    || defaultCustomCommand(input.agent, runtimeEnv);
-  const configured = input.config?.args.length
-    ? input.config.args
-    : splitArgs(
-      runtimeEnv[`ROUNDTABLE_AGENT_ARGS_${envKey(input.agent.id)}`]
-      || runtimeEnv[`ROUNDTABLE_AGENT_ARGS_${envKey(input.agent.role)}`]
-      || runtimeEnv.ROUNDTABLE_AGENT_ARGS
-      || '',
-    );
-  const args = configured.length > 0
-    ? substitutePrompt(configured, input.prompt, 'stdin')
-    : defaultCustomArgs(command, input.prompt);
-  return commandSpec(command, args, null, env);
+  throw new Error(`unsupported_runtime:${input.runtime}`);
 }
 
 function commandSpec(command: string, args: string[], stdin: string | null, env: NodeJS.ProcessEnv): CommandSpec {
@@ -298,8 +325,9 @@ function runtimeModel(
   return '';
 }
 
-function claudePrintArgs(
-  input: RuntimeExecutionInput,
+// Exported for tests: the resume wiring is pure argument construction.
+export function claudePrintArgs(
+  input: Pick<RuntimeExecutionInput, 'runtime' | 'config' | 'prompt' | 'resumeSessionId'>,
   env: NodeJS.ProcessEnv,
   options: { includeModel?: boolean } = {},
 ): string[] {
@@ -307,6 +335,9 @@ function claudePrintArgs(
   const model = includeModel ? runtimeModel(input.runtime, input.config, env) : '';
   const effort = runtimeEffort(input.config, env);
   return [
+    // Resuming forks the stored session, giving the agent its conversation
+    // memory from earlier turns in this chat.
+    ...(input.resumeSessionId ? ['--resume', input.resumeSessionId] : []),
     '-p',
     input.prompt,
     '--output-format',
@@ -370,9 +401,13 @@ async function prepareClaudeCodeRouterConfig(
   const model = env.ROUNDTABLE_CCR_MODEL || env.LLM_MODEL || env.OPENAI_MODEL;
   if (!model) throw new Error(`model_provider_missing_model:${provider}`);
 
-  const home = roundtableCcrHome(input.workspace, input.conversationId);
+  // Scope the router HOME (where claude session state lives) and port by the
+  // chat, not the per-task conversation: session resume only works when the
+  // next task finds the same HOME, and one router instance per chat is enough.
+  const scope = input.sessionScopeId ?? input.conversationId;
+  const home = roundtableCcrHome(input.workspace, scope);
   const configDir = join(home, '.claude-code-router');
-  const port = ccrPortForConversation(input.conversationId);
+  const port = ccrPortForConversation(scope);
   env.HOME = home;
   if (process.platform === 'win32') env.USERPROFILE = home;
 
@@ -421,16 +456,6 @@ function providerQualifiedOpenCodeModel(model: string, env: NodeJS.ProcessEnv): 
   return `${provider}/${model}`;
 }
 
-function defaultCustomCommand(agent: AgentProfile, runtimeEnv: NodeJS.ProcessEnv): string {
-  if (agent.role === 'reviewer' && runtimeEnv.ROUNDTABLE_REVIEWER_PREFERS_OPENCODE === '1') return 'opencode';
-  return 'claude';
-}
-
-function defaultCustomArgs(command: string, prompt: string): string[] {
-  if (command.endsWith('opencode') || command.includes('/opencode')) return ['run', prompt];
-  return ['-p', prompt, '--permission-mode', 'auto'];
-}
-
 function substitutePrompt(args: string[], prompt: string, mode: 'argv' | 'stdin' = 'argv'): string[] {
   if (args.some((arg) => arg.includes('{prompt}'))) {
     return args.map((arg) => arg.replace('{prompt}', prompt));
@@ -467,9 +492,16 @@ type RuntimeParser = {
   push(chunk: string, emit: EmitRuntimeEvent): Promise<void>;
   flush(emit: EmitRuntimeEvent): Promise<void>;
   text(): string;
+  sessionId(): string | null;
 };
 
 type EmitRuntimeEvent = (event: AgentEvent, transcript?: RuntimeTranscriptEntry | undefined) => Promise<void>;
+
+// Side-channel the structured-event handlers write into while parsing: the
+// runtime's own session identity, needed after the run to persist for resume.
+type RuntimeParseMeta = {
+  sessionId: string | null;
+};
 
 function parserForRuntime(runtime: AgentRuntimeKind): RuntimeParser {
   if (runtime === 'claude-code' || runtime === 'claude-code-router') return new JsonLineParser(handleClaudeEvent);
@@ -490,11 +522,16 @@ class PlainParser implements RuntimeParser {
   text(): string {
     return this.chunks.join('');
   }
+
+  sessionId(): string | null {
+    return null;
+  }
 }
 
 class JsonLineParser implements RuntimeParser {
   private buffer = '';
   private texts: string[] = [];
+  private meta: RuntimeParseMeta = { sessionId: null };
 
   constructor(private readonly handle: StructuredEventHandler) {}
 
@@ -514,12 +551,16 @@ class JsonLineParser implements RuntimeParser {
     return this.texts.join('\n');
   }
 
+  sessionId(): string | null {
+    return this.meta.sessionId;
+  }
+
   private async processLine(line: string, emit: EmitRuntimeEvent): Promise<void> {
     const trimmed = line.trim();
     if (!trimmed) return;
     const parsed = parseJsonObject(trimmed);
     if (!parsed) return;
-    const result = await this.handle(parsed, emit);
+    const result = await this.handle(parsed, emit, this.meta);
     if (result) this.texts.push(result);
   }
 }
@@ -527,6 +568,7 @@ class JsonLineParser implements RuntimeParser {
 class JsonObjectParser implements RuntimeParser {
   private buffer = '';
   private texts: string[] = [];
+  private meta: RuntimeParseMeta = { sessionId: null };
 
   constructor(private readonly handle: StructuredEventHandler) {}
 
@@ -535,7 +577,7 @@ class JsonObjectParser implements RuntimeParser {
     const drained = drainJsonObjects(this.buffer);
     this.buffer = drained.rest;
     for (const item of drained.objects) {
-      const result = await this.handle(item, emit);
+      const result = await this.handle(item, emit, this.meta);
       if (result) this.texts.push(result);
     }
   }
@@ -544,7 +586,7 @@ class JsonObjectParser implements RuntimeParser {
     const drained = drainJsonObjects(this.buffer);
     this.buffer = drained.rest;
     for (const item of drained.objects) {
-      const result = await this.handle(item, emit);
+      const result = await this.handle(item, emit, this.meta);
       if (result) this.texts.push(result);
     }
   }
@@ -552,11 +594,27 @@ class JsonObjectParser implements RuntimeParser {
   text(): string {
     return this.texts.join('\n');
   }
+
+  sessionId(): string | null {
+    return this.meta.sessionId;
+  }
 }
 
-type StructuredEventHandler = (event: Record<string, unknown>, emit: EmitRuntimeEvent) => Promise<string | null>;
+type StructuredEventHandler = (
+  event: Record<string, unknown>,
+  emit: EmitRuntimeEvent,
+  meta: RuntimeParseMeta,
+) => Promise<string | null>;
 
-async function handleClaudeEvent(event: Record<string, unknown>, emit: EmitRuntimeEvent): Promise<string | null> {
+async function handleClaudeEvent(
+  event: Record<string, unknown>,
+  emit: EmitRuntimeEvent,
+  meta: RuntimeParseMeta,
+): Promise<string | null> {
+  // Every claude stream-json event carries the session id; when the run was
+  // started with --resume the CLI forks to a NEW id, so always keep the latest.
+  const session = stringProp(event, 'session_id');
+  if (session) meta.sessionId = session;
   const eventType = stringProp(event, 'type');
   if (eventType === 'assistant') {
     const message = objectProp(event, 'message');
@@ -590,8 +648,16 @@ async function handleClaudeEvent(event: Record<string, unknown>, emit: EmitRunti
   return null;
 }
 
-async function handleCodexEvent(event: Record<string, unknown>, emit: EmitRuntimeEvent): Promise<string | null> {
+async function handleCodexEvent(
+  event: Record<string, unknown>,
+  emit: EmitRuntimeEvent,
+  meta: RuntimeParseMeta,
+): Promise<string | null> {
   const eventType = stringProp(event, 'type');
+  if (eventType === 'thread.started') {
+    const thread = stringProp(event, 'thread_id');
+    if (thread) meta.sessionId = thread;
+  }
   if (eventType !== 'item.completed') {
     if (eventType === 'turn.failed') {
       const error = objectProp(event, 'error');
@@ -622,7 +688,15 @@ async function handleCodexEvent(event: Record<string, unknown>, emit: EmitRuntim
   return null;
 }
 
-async function handleOpenCodeEvent(event: Record<string, unknown>, emit: EmitRuntimeEvent): Promise<string | null> {
+async function handleOpenCodeEvent(
+  event: Record<string, unknown>,
+  emit: EmitRuntimeEvent,
+  meta: RuntimeParseMeta,
+): Promise<string | null> {
+  const session = stringProp(event, 'sessionID')
+    || stringProp(objectProp(event, 'part'), 'sessionID')
+    || stringProp(objectProp(event, 'info'), 'id');
+  if (session) meta.sessionId = session;
   const eventType = (stringProp(event, 'type') || '').toLowerCase();
   if (eventType.includes('error')) {
     const message = errorText(event) || 'opencode_error';

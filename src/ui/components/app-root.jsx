@@ -13,8 +13,10 @@ import { RoundtableScene, WhiteboardZoom, sceneAt } from './roundtable';
 import { WorkflowView } from './workflow';
 import { Modal, NewTaskModal, NewWorkbenchModal, AddAgentModal } from './modals';
 import { TopBar, recommendWorkflow, Dock } from './stage-scene';
+import { LiveTranscriptFeed } from './live-turn';
 import { Drawer, InspectorPanel } from './inspector';
 import { latestLiveTurn, buildLocalScene } from '../lib/live-scene';
+import { withBundledPreview } from '../lib/preview-html';
 import { signOut, useSession } from 'next-auth/react';
 import { trpc } from '@/ui/lib/trpc';
 
@@ -317,7 +319,17 @@ function agentWorkFor(agentId, turnResult) {
     || [...ownedTaskIds].some((taskId) => art.id.startsWith(`${taskId}_`)),
   );
   return {
-    tasks: tasks.map((task) => ({ ...task, status: records.get(task.id)?.status || 'pending' })),
+    // Dispatch records are the final per-task truth but only land at end of
+    // run; while the agent works, liveActivity carries status + the streaming
+    // runtime transcript, so the Work tab can show the process, not a title.
+    tasks: tasks.map((task) => {
+      const activity = turnResult.liveActivity?.[task.id] || null;
+      return {
+        ...task,
+        activity,
+        status: records.get(task.id)?.status || activity?.status || 'pending',
+      };
+    }),
     artifacts,
     adapter: turnResult.dispatchAdapter || null,
   };
@@ -328,6 +340,7 @@ const DM_WORK_STATUS = {
   failed: { label: 'failed', color: 'var(--bad)' },
   blocked: { label: 'blocked', color: 'var(--warn)' },
   running: { label: 'working', color: 'var(--run)' },
+  stopped: { label: 'stopped', color: 'var(--text-faint)' },
   pending: { label: 'queued', color: 'var(--text-faint)' },
 };
 
@@ -355,10 +368,18 @@ function DMWorkPanel({ agent, work }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text)' }}>{task.title}</div>
                   <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 5 }}>
-                    {adapter && <MetaChip label={`via ${adapter}`} />}
+                    {/* The live feed header below already names the runtime. */}
+                    {!task.activity && adapter && <MetaChip label={`via ${adapter}`} />}
                     {(task.deps || []).map((dep) => <MetaChip key={dep} label={`input ${dep}`} />)}
                   </div>
-                  {task.brief && <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 2 }}>{task.brief}</div>}
+                  {/* Once the runtime is streaming, the live transcript IS the
+                      story of this task — the static brief only matters before
+                      there is anything real to show. */}
+                  {task.activity
+                    ? <div style={{ marginTop: 7 }}>
+                        <LiveTranscriptFeed activity={task.activity} agents={{ [agent.id]: agent, orchestrator: agent }} compact />
+                      </div>
+                    : task.brief && <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 2 }}>{task.brief}</div>}
                 </div>
                 <span style={{ fontSize: 10.5, fontWeight: 700, color: st.color }}>{st.label}</span>
               </div>
@@ -627,6 +648,15 @@ function App() {
     onSuccess: () => trpcUtils.messages.list.invalidate(),
   });
   const polishPrompt = trpc.ai.polish.useMutation();
+  // Workflow templates are the orchestrator's source of truth for the default
+  // task chain — the editor reads and writes these (not a client-only copy).
+  const workflowTemplatesQ = trpc.missions.templates.useQuery(undefined, { enabled: authed });
+  const saveWorkflowTemplate = trpc.missions.saveTemplate.useMutation({
+    onSuccess: () => trpcUtils.missions.templates.invalidate(),
+  });
+  const deleteWorkflowTemplate = trpc.missions.deleteTemplate.useMutation({
+    onSuccess: () => trpcUtils.missions.templates.invalidate(),
+  });
   const deleteChat = trpc.chats.delete.useMutation({
     onSuccess: () => {
       trpcUtils.chats.list.invalidate();
@@ -747,14 +777,23 @@ function App() {
   // The finished, renderable site for the active run (if any): a preview artifact
   // with HTML content. Drives the center-stage "Preview" toggle.
   const centerPreviewArtifact = useMemo(() => {
-    const fromTurn = activeLocalTurn?.result?.artifacts?.find(
+    // Prefer the homepage over whatever page happens to sit first in the array —
+    // mirrors the backend's `primary` pick in artifactsFromRun.
+    const indexFirst = (list, match) => {
+      const candidates = (list || []).filter(match);
+      return candidates.find((a) => /(^|\/)index\.html?$/i.test(a.title || '')) ?? candidates[0] ?? null;
+    };
+    const fromTurn = indexFirst(
+      activeLocalTurn?.result?.artifacts,
       (a) => a.kind === 'preview' && (a.preview || '').trim(),
     );
-    if (fromTurn) return fromTurn;
-    const fromLive = (liveArtifacts || []).find(
+    const turnArtifacts = activeLocalTurn?.result?.artifacts || [];
+    if (fromTurn) return withBundledPreview(fromTurn, turnArtifacts);
+    const fromLive = indexFirst(
+      liveArtifacts,
       (a) => (a.kind === 'preview' || a.kind === 'html') && (a.preview || a.code || '').trim(),
     );
-    return fromLive || null;
+    return fromLive ? withBundledPreview(fromLive, liveArtifacts || []) : null;
   }, [activeLocalTurn, liveArtifacts]);
   // Don't keep showing the preview after switching to a run that has none.
   useEffect(() => { if (!centerPreviewArtifact) setCenterPreview(false); }, [centerPreviewArtifact]);
@@ -1248,7 +1287,7 @@ function App() {
                 {notesOpen && <InspectorPanel tab={inspectorTab} setTab={setInspectorTab} clock={scene.clock} width={compact ? 'min(100vw, 420px)' : inspectorW}
                   agents={agents} scene={scene} authed={authed} live={authed && !!activeChatId} liveArtifacts={liveArtifacts} liveMessages={liveMessages}
                   liveHandoffs={liveHandoffs} activeChatId={activeChatId}
-                  localTurns={activeLocalTurns.length ? activeLocalTurns : localTurns} localStatus={localStatus} onApproveLocalTurn={approveLocalTurn}
+                  localTurns={activeLocalTurns.length ? activeLocalTurns : localTurns} allLocalTurns={localTurns} localStatus={localStatus} onApproveLocalTurn={approveLocalTurn}
                   localTurnActions={{ interrupt: interruptLocalTurn, redispatch: redispatchLocalTurn, discard: discardLocalTurn, clarify: answerLocalClarification, approve: approveLocalTurn, delivery: decideLocalDelivery }}
                   onOpenArtifact={setDrawerArt} onAction={onAction} onClose={() => setNotesOpen(false)}
                   onRewrite={sendComposerMessage} />}
@@ -1262,7 +1301,10 @@ function App() {
                 workflow={liveWorkflow} workflowRun={liveWorkflowRun} />
             </>
           )}
-          {view === 'workflow' && <WorkflowView agents={agents} onAddAgent={() => setModal('agent')} onOpenTemplates={() => setModal('table')} />}
+          {view === 'workflow' && <WorkflowView agents={agents} onAddAgent={() => setModal('agent')} onOpenTemplates={() => setModal('table')}
+            serverTemplates={authed ? workflowTemplatesQ.data : null}
+            onSaveTemplate={(template) => saveWorkflowTemplate.mutate(template)}
+            onDeleteTemplate={(id) => deleteWorkflowTemplate.mutate({ id })} />}
         </div>
       </div>
 

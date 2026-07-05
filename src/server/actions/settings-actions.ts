@@ -168,6 +168,7 @@ export async function saveSettings(input: {
       else providers.push(next);
     }
     data.settings = {
+      ...data.settings,
       defaultAgentAdapter: hasAdapterPatch ? adapter ?? null : data.settings.defaultAgentAdapter,
       modelProviders: providers,
       updatedAt: nowIso(),

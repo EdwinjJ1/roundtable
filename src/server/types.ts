@@ -40,12 +40,17 @@ export type Artifact = {
   chatId: string;
   kind: ArtifactKind;
   title: string;
+  // The agent that produced the CURRENT version — on a version bump this is
+  // updated to the last editor, which is what makes per-file blame possible.
   ownerAgentId: string;
   version: number;
   uri: string;
   preview: string | null;
   code: string | null;
   createdAt: string;
+  // Line-level stats for the latest version: all-added on creation, computed
+  // against the previous version on each bump. Absent on legacy artifacts.
+  change?: { added: number; removed: number } | null;
 };
 
 export type WorkflowSeat =
@@ -104,7 +109,6 @@ export type AgentRole = 'planner' | 'pm' | 'architect' | 'implementer' | 'review
 
 export type AgentRuntimeKind =
   | 'local-dispatch'
-  | 'custom-cli'
   | 'claude-code'
   | 'claude-code-router'
   | 'codex'
@@ -180,6 +184,10 @@ export type AgentRuntimeConversation = {
   events: AgentEvent[];
   transcript: AgentRuntimeTranscriptEntry[];
   error: string | null;
+  // CLI-native session id (claude session_id / codex thread_id / opencode
+  // sessionID) captured from the run, when the runtime reported one. Optional:
+  // records predate this field.
+  sessionId?: string | null;
 };
 
 export type ModelProviderKind = 'minimax' | 'openai-compatible';
@@ -197,6 +205,10 @@ export type ModelProviderConfig = {
 export type RoundtableSettings = {
   defaultAgentAdapter: string | null;
   modelProviders: ModelProviderConfig[];
+  // User-edited workflow templates. A custom template with a builtin id
+  // OVERRIDES that builtin everywhere (resolution, auto-select, plan
+  // generation); novel ids are additional selectable workflows.
+  workflowTemplates: WorkflowTemplate[];
   updatedAt: string;
 };
 
@@ -258,23 +270,10 @@ export type UserProfile = {
   updatedAt: string;
 };
 
+// Retained for WorkingStyleSnapshot: profile default skills and stored turn
+// snapshots still carry a source/scope even though the skills panel is gone.
 export type UserSkillSource = 'user' | 'observed' | 'workspace' | 'recommended';
 export type UserSkillScope = 'personal' | 'workspace' | 'mission';
-
-export type UserSkill = {
-  id: string;
-  userId: string;
-  key: string;
-  label: string;
-  description: string;
-  source: UserSkillSource;
-  scope: UserSkillScope;
-  targetChatId: string | null;
-  enabled: boolean;
-  evidence: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
 
 export type WorkingStyleSnapshot = {
   skills: Array<{
@@ -330,6 +329,11 @@ export type PlanTask = {
   owner?: string | undefined;
   role?: string | undefined;
   stageId?: string | undefined;
+  // The template stage KIND this task was generated from ('plan' | 'work' |
+  // 'review' …). stageId is the stage's (possibly renamed) id; kind is stable,
+  // so gating logic (e.g. the architect's review check) survives custom
+  // templates that rename their stages.
+  stageKind?: string | undefined;
   requiredCapabilities?: string[] | undefined;
   brief: string;
   deps: string[];
@@ -382,6 +386,10 @@ export type DispatchRecord = {
   // fix attempt, and how many fix rounds had run for that branch.
   producedFor?: string | undefined;
   fixRound?: number | undefined;
+  // Every artifact this task's run produced or edited (transcript + workspace
+  // files) — the per-agent attribution link the conversation UI renders.
+  // Absent on records persisted before this field existed.
+  artifactIds?: string[] | undefined;
 };
 
 export type WorkflowStageRunStatus = 'pending' | 'active' | 'running' | 'done' | 'blocked' | 'failed';
@@ -464,7 +472,16 @@ export type Mission = {
   id: string;
   ownerId: string | null;
   chatId: string | null;
+  // The turn that most recently (re)defined this mission's plan.
   sourceTurnId: string;
+  // Every turn that has contributed to the mission, oldest first. A chat's
+  // follow-up turns continue one mission instead of spawning siblings.
+  // Optional: records created before cross-turn continuity carry only
+  // sourceTurnId.
+  turnIds?: string[];
+  // Standalone missions (question turns) never become — or continue — the
+  // chat's ongoing mission.
+  standalone?: boolean;
   goal: string;
   workingStyle: WorkingStyleSnapshot;
   status: MissionStatus;

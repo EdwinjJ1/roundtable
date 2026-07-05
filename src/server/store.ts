@@ -15,7 +15,6 @@ import type {
   Mission,
   RoundtableSettings,
   UserProfile,
-  UserSkill,
   Workbench,
   WorkbenchPin,
 } from './types.js';
@@ -29,7 +28,6 @@ export type RoundtableData = {
   artifacts: Artifact[];
   handoffs: Handoff[];
   profiles: UserProfile[];
-  userSkills: UserSkill[];
   workbenchPins: WorkbenchPin[];
   turns: LocalTurn[];
   missions: Mission[];
@@ -74,16 +72,32 @@ export async function writeData(data: RoundtableData): Promise<void> {
     await writePostgresData(data);
     return;
   }
-  await writeJsonData(data);
+  await withJsonLock(() => writeJsonData(data));
 }
 
 export async function mutateData<T>(fn: (data: RoundtableData) => T | Promise<T>): Promise<T> {
   if (useNormalizedPostgresStore()) return mutateNormalizedPostgresData(fn);
   if (usePostgresStore()) return mutatePostgresData(fn);
-  const data = await readJsonData();
-  const result = await fn(data);
-  await writeJsonData(data);
-  return result;
+  return withJsonLock(async () => {
+    const data = await readJsonData();
+    const result = await fn(data);
+    await writeJsonData(data);
+    return result;
+  });
+}
+
+// The JSON store is one shared file mutated by read-modify-write: concurrent
+// callers (parallel scheduler waves, runtime-conversation updates from several
+// agents) would silently drop each other's changes — and interleaved writes to
+// the shared temp file tear it into invalid JSON. Serialize every mutation
+// through an in-process promise chain.
+let jsonLock: Promise<unknown> = Promise.resolve();
+
+function withJsonLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = jsonLock.then(fn);
+  // A failed mutation must not wedge the chain for every later caller.
+  jsonLock = run.catch(() => undefined);
+  return run;
 }
 
 export async function resetData(): Promise<void> {
@@ -100,10 +114,15 @@ async function readJsonData(): Promise<RoundtableData> {
   }
 }
 
+let writeSeq = 0;
+
 async function writeJsonData(data: RoundtableData): Promise<void> {
   const target = dataPath();
   await mkdir(dirname(target), { recursive: true });
-  const temp = `${target}.${process.pid}.tmp`;
+  // Unique per write: a pid-only name collides when two writers in the same
+  // process interleave (or two dev processes share the file), tearing the temp
+  // file before the atomic rename.
+  const temp = `${target}.${process.pid}.${++writeSeq}.tmp`;
   await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
   await rename(temp, target);
 }
@@ -579,26 +598,6 @@ const NORMALIZED_TABLE_SPECS = [
     orderBy: 'user_id ASC',
     columns: [{ name: 'record_updated_at', value: (row) => row.updatedAt }],
   }),
-  makeTableSpec<UserSkill>({
-    table: 'roundtable_user_skills',
-    idColumn: 'id',
-    rows: (data) => data.userSkills,
-    assign: (data, rows) => {
-      data.userSkills = rows;
-    },
-    id: (row) => row.id,
-    orderBy: 'created_at ASC, id ASC',
-    columns: [
-      { name: 'user_id', value: (row) => row.userId },
-      { name: 'key', value: (row) => row.key },
-      { name: 'scope', value: (row) => row.scope },
-      { name: 'target_chat_id', value: (row) => row.targetChatId },
-      { name: 'enabled', value: (row) => row.enabled },
-      { name: 'source', value: (row) => row.source },
-      { name: 'created_at', value: (row) => row.createdAt },
-      { name: 'record_updated_at', value: (row) => row.updatedAt },
-    ],
-  }),
   makeTableSpec<WorkbenchPin>({
     table: 'roundtable_workbench_pins',
     idColumn: 'id',
@@ -864,7 +863,6 @@ function emptyData(): RoundtableData {
     artifacts: [],
     handoffs: [],
     profiles: [],
-    userSkills: [],
     workbenchPins: [],
     turns: [],
     missions: [],
@@ -885,7 +883,6 @@ function normalizeData(raw: Partial<RoundtableData>): RoundtableData {
     artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : [],
     handoffs: Array.isArray(raw.handoffs) ? raw.handoffs : [],
     profiles: Array.isArray(raw.profiles) ? raw.profiles : [],
-    userSkills: Array.isArray(raw.userSkills) ? raw.userSkills : [],
     workbenchPins: Array.isArray(raw.workbenchPins) ? raw.workbenchPins : [],
     turns: Array.isArray(raw.turns) ? raw.turns : [],
     missions: Array.isArray(raw.missions) ? raw.missions : [],
@@ -922,6 +919,7 @@ function emptySettings(): RoundtableSettings {
   return {
     defaultAgentAdapter: null,
     modelProviders: [],
+    workflowTemplates: [],
     updatedAt: nowIso(),
   };
 }
@@ -931,6 +929,7 @@ function normalizeSettings(raw: Partial<RoundtableSettings> | undefined): Roundt
   return {
     defaultAgentAdapter: typeof raw.defaultAgentAdapter === 'string' ? raw.defaultAgentAdapter : null,
     modelProviders: Array.isArray(raw.modelProviders) ? raw.modelProviders : [],
+    workflowTemplates: Array.isArray(raw.workflowTemplates) ? raw.workflowTemplates : [],
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : nowIso(),
   };
 }

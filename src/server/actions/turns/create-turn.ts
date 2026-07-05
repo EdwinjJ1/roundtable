@@ -4,6 +4,7 @@ import type {
   ClarifyAnswer,
   ClarifyQuestion,
   LocalTurn,
+  WorkflowTemplate,
   WorkingStyleSnapshot,
 } from '../../types.js';
 import { applyAnswers, assessClarity } from '../clarify-actions.js';
@@ -11,6 +12,8 @@ import { getChat } from '../chat-actions.js';
 import {
   buildMissionSnapshot,
   createMission,
+  latestMissionForChat,
+  resolveWorkflowTemplate,
   selectWorkflowTemplate,
   updateMissionForPlannedTurn,
   workflowRunForTurn,
@@ -45,9 +48,20 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
   // the user answers, then answerClarification() resumes with the enriched goal.
   // A question is answered as-is: interrogating the user about "scope and tech
   // stack" before answering their question is the build pipeline leaking.
-  const assessment = intakeFromMessage(message).intentType === 'question'
+  const intentType = intakeFromMessage(message).intentType;
+  const assessment = intentType === 'question'
     ? { clarity: 1, needsClarification: false, questions: [] }
     : await assessClarity(message);
+  // Cross-turn continuity: a follow-up request in a chat continues the chat's
+  // ongoing mission (revising its plan) instead of stacking a new mission per
+  // message. Questions stay standalone — asking about the work must never
+  // reset the work's plan.
+  const continuedMission = intentType === 'question'
+    ? null
+    : await latestMissionForChat(input.actor?.id ?? null, chatId);
+  // Custom-aware: a user-edited template (same id as a builtin, or a novel
+  // one) drives both the mission stages AND the generated task DAG.
+  const template = await resolveWorkflowTemplate(input.workflowTemplateId, message);
   const now = nowIso();
   if (assessment.needsClarification) {
     const turn = buildTurn({
@@ -59,7 +73,9 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
       needsClarification: true,
       clarifyQuestions: assessment.questions,
       clarifyAnswers: [],
+      missionId: continuedMission?.id,
       workflowTemplateId: input.workflowTemplateId,
+      template,
       workingStyle,
     });
     const mission = await createMission({
@@ -71,6 +87,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
       plan: turn.plan,
       needsClarification: true,
       workflowTemplateId: turn.workflowTemplateId,
+      template,
       workingStyle,
     });
     const turnWithMission = {
@@ -90,7 +107,9 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
     ownerId: input.actor?.id ?? null,
     message,
     now,
+    missionId: continuedMission?.id,
     workflowTemplateId: input.workflowTemplateId,
+    template,
     workingStyle,
   });
   const mission = await createMission({
@@ -102,7 +121,9 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
     plan: turn.plan,
     needsClarification: false,
     workflowTemplateId: turn.workflowTemplateId,
+    template,
     workingStyle,
+    standalone: intentType === 'question',
   });
   const turnWithMission = {
     ...turn,
@@ -132,19 +153,24 @@ function buildTurn(opts: {
   clarifyAnswers?: ClarifyAnswer[];
   missionId?: string | undefined;
   workflowTemplateId?: string | undefined;
+  // The custom-aware resolved template from resolveWorkflowTemplate(). The
+  // sync fallback below only sees builtins, so async callers should always
+  // resolve and pass this.
+  template?: WorkflowTemplate | undefined;
   workingStyle?: WorkingStyleSnapshot | undefined;
 }): LocalTurn {
   const { turnId, chatId, ownerId, message, now } = opts;
   const parked = opts.needsClarification === true;
   const workingStyle = opts.workingStyle ?? emptyWorkingStyle();
-  const workflowTemplate = opts.workflowTemplateId
-    ? workflowTemplateById(opts.workflowTemplateId)
-    : selectWorkflowTemplate(message);
+  const workflowTemplate = opts.template
+    ?? (opts.workflowTemplateId
+      ? workflowTemplateById(opts.workflowTemplateId)
+      : selectWorkflowTemplate(message));
   const missionId = opts.missionId ?? id('mission');
   const intake = intakeFromMessage(message);
   const plan = parked
     ? { summary: `Awaiting clarification: ${message.slice(0, 80)}`, tasks: [] }
-    : planFromMessage(message, workingStyle, intake.intentType);
+    : planFromMessage(message, workingStyle, intake.intentType, workflowTemplate);
   // Question turns produce an answer, not a mission dossier: intake/plan
   // artifacts would be noise next to it.
   const artifacts = parked || intake.intentType === 'question'
@@ -252,6 +278,7 @@ export async function answerClarification(input: {
 
   const enrichedMessage = applyAnswers(existing.message, existing.clarifyQuestions, input.answers);
   const now = nowIso();
+  const resumedTemplate = await resolveWorkflowTemplate(existing.workflowTemplateId, enrichedMessage);
   const planned = buildTurn({
     turnId: existing.id,
     chatId: existing.localChatId,
@@ -261,6 +288,7 @@ export async function answerClarification(input: {
     clarifyAnswers: input.answers,
     missionId: existing.missionId,
     workflowTemplateId: existing.workflowTemplateId,
+    template: resumedTemplate,
     workingStyle: existing.workingStyle,
   });
   // Preserve the original user-facing message; keep the enriched text in the plan.
