@@ -220,6 +220,7 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
         {tabBtn('files', `Files · ${created.length + provided.length}`)}
         {tabBtn('notes', 'Notes')}
         {tabBtn('memory', 'Skills')}
+        {tabBtn('agentMemory', 'Memory')}
         <button onClick={onClose} style={{ ...iconBtn, border: 'none', background: 'transparent' }}><Icon name="x" size={15} /></button>
       </div>
       <div style={{ borderBottom: '1px solid var(--border)' }} />
@@ -251,10 +252,107 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
         </div>
       ) : tab === 'memory' ? (
         <MemoryPanel memory={memory} />
+      ) : tab === 'agentMemory' ? (
+        <MemoryTab activeChatId={activeChatId} authed={authed} />
       ) : live || hasLocalTurns ? (
         <LiveNotes agents={agents} artifacts={created} handoffs={liveHandoffs} />
       ) : (
         <NotesContent clock={clock} agents={agents} notes={notes} />
+      )}
+    </div>
+  );
+}
+
+/* ---- memory tab: each agent's persistent facts, with export + promote ---- */
+function MemoryTab({ activeChatId, authed }) {
+  const overviewQ = trpc.agentMemory.overview.useQuery(
+    { chatId: activeChatId || undefined },
+    { enabled: !!authed, refetchInterval: 20000 },
+  );
+  const utils = trpc.useUtils();
+  const promote = trpc.agentMemory.promote.useMutation({
+    onSuccess: () => utils.agentMemory.overview.invalidate(),
+  });
+  const [exporting, setExporting] = useState(false);
+  const onExport = async () => {
+    setExporting(true);
+    try {
+      const bundle = await utils.agentMemory.export.fetch({ chatId: activeChatId || undefined });
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `roundtable-memory-${bundle.exportedAt.slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  };
+  const overviews = overviewQ.data ?? [];
+  const badge = (label, color) => (
+    <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999,
+      background: alpha(color, 0.12), color }}>{label}</span>
+  );
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 24px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '0 0 12px' }}>
+        <div style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
+          Agent memory
+        </div>
+        <button onClick={onExport} disabled={exporting || overviews.length === 0}
+          style={{ ...iconBtn, width: 'auto', padding: '0 10px', fontSize: 11.5, fontWeight: 600, gap: 5,
+            opacity: overviews.length === 0 ? 0.5 : 1 }}>
+          <Icon name="clip" size={13} /> {exporting ? 'Exporting…' : 'Export'}
+        </button>
+      </div>
+      {overviewQ.isLoading ? (
+        <div style={{ padding: '8px 2px' }}><Spinner /></div>
+      ) : overviews.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: 'var(--text-faint)', fontStyle: 'italic', padding: '4px 2px' }}>
+          No memory yet — agents write facts here as they work, and reuse them in later missions.
+        </div>
+      ) : overviews.map((agent) => (
+        <div key={agent.agentId} style={{ marginBottom: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, margin: '0 0 7px' }}>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>{agent.displayName}</span>
+            <RoleTag role={agent.role} />
+          </div>
+          {agent.compactionNeeds.map((need, index) => (
+            <div key={index} style={{ fontSize: 11.5, color: 'var(--warn, #b45309)', margin: '0 0 6px', lineHeight: 1.4 }}>
+              ⚠ {need}
+            </div>
+          ))}
+          {agent.facts.map((fact) => (
+            <div key={`${fact.scope}-${fact.slug}`} style={{ display: 'flex', alignItems: 'flex-start', gap: 8,
+              padding: '7px 9px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border)',
+              background: 'var(--surface-2)', marginBottom: 6 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--mono, monospace)' }}>{fact.slug}</span>
+                  {badge(fact.scope, fact.scope === 'global' ? '#7c5cff' : '#0e9f6e')}
+                  {fact.type !== 'note' && badge(fact.type, fact.type === 'unreviewed' ? '#b45309' : 'var(--text-faint)')}
+                  {fact.overLimit && badge('over budget', '#dc2626')}
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--text-faint)', marginTop: 2, lineHeight: 1.4 }}>{fact.description}</div>
+              </div>
+              {fact.scope === 'project' && activeChatId && (
+                <button
+                  onClick={() => promote.mutate({ chatId: activeChatId, agentId: agent.agentId, slug: fact.slug })}
+                  disabled={promote.isPending}
+                  title="Promote to this agent's global memory (available in every project)"
+                  style={{ ...iconBtn, width: 'auto', padding: '0 8px', fontSize: 11, fontWeight: 600 }}>
+                  Promote
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
+      {promote.data?.status === 'store_full' && (
+        <div style={{ fontSize: 11.5, color: 'var(--warn, #b45309)' }}>
+          Global store is at capacity — the agent must compact its memory before new facts can be promoted.
+        </div>
       )}
     </div>
   );

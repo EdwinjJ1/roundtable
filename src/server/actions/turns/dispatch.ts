@@ -23,6 +23,7 @@ import { hasBlockingFinding, safetyEnabled, scanArtifact } from '../safety.js';
 import { runScheduler, type ScheduledTask, type TaskResult } from '../scheduler.js';
 import { resolveDefaultAgentAdapter } from '../settings-actions.js';
 import { artifactsFromRun, finalReportArtifact, reviewerSummaryArtifact, upsertArtifacts } from './artifacts.js';
+import { buildDocsAuditContext } from './doc-policy.js';
 import { ActionError } from './errors.js';
 import {
   isReviewGateTask,
@@ -215,18 +216,29 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
       task: effectiveTask,
       artifacts: contextArtifacts,
     });
+    // The architect's delivery-gate review doubles as the docs & memory audit:
+    // it sees every Markdown artifact and each agent's memory health, and its
+    // blocking findings route through the same review→fix loop.
+    const docsAudit = effectiveTask.role === 'architect' && isReviewGateTask(effectiveTask)
+      ? await buildDocsAuditContext({
+          workspace,
+          ownerId: turn.ownerId ?? 'local-user',
+          artifacts: contextArtifacts,
+        }).catch(() => '')
+      : '';
     const handoffContext = [
       formatWorkingStyleForPrompt(turn.workingStyle)
         ? `# User working style\n\n${formatWorkingStyleForPrompt(turn.workingStyle)}`
         : '',
       continuationContext,
+      docsAudit,
       formatHandoffContext(handoffCard, depOutputs),
     ].filter(Boolean).join('\n\n---\n\n');
 
     let result;
     let fallbackNote: AgentEvent | null = null;
     try {
-      result = await runAgentTask({ adapter, workspace, task: effectiveTask, message: turn.message, turnId: turn.id, chatId: turn.localChatId, handoffContext, runtimeEnv });
+      result = await runAgentTask({ adapter, workspace, task: effectiveTask, message: turn.message, turnId: turn.id, chatId: turn.localChatId, ownerId: turn.ownerId ?? 'local-user', handoffContext, runtimeEnv });
     } catch (error) {
       // Opt-in adapter unavailable (E2B / MiniMax / OpenAI-compatible): fall back
       // to local-dispatch in this layer (not silently inside the adapter). The
@@ -241,7 +253,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
           type: 'thinking_delta',
           delta: `${error.name} (${error.message}); fell back to local-dispatch.`,
         };
-        result = await runAgentTask({ adapter: 'local-dispatch', workspace, task: effectiveTask, message: turn.message, turnId: turn.id, chatId: turn.localChatId, handoffContext, runtimeEnv });
+        result = await runAgentTask({ adapter: 'local-dispatch', workspace, task: effectiveTask, message: turn.message, turnId: turn.id, chatId: turn.localChatId, ownerId: turn.ownerId ?? 'local-user', handoffContext, runtimeEnv });
       } else {
         throw error;
       }

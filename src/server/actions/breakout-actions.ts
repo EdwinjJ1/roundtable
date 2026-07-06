@@ -28,6 +28,7 @@ import type { AgentProfile } from './agent-roster.js';
 import { isMiniMaxConfigured, runOnMiniMax } from './adapters/minimax-adapter.js';
 import { isOpenAICompatConfigured, runOnOpenAICompat } from './adapters/openai-compat-adapter.js';
 import { getChat } from './chat-actions.js';
+import { tokenizeForOverlap } from './text-overlap.js';
 
 export type BreakoutRoomBundle = BreakoutRoom & {
   messages: BreakoutMessage[];
@@ -555,18 +556,6 @@ function summarizeArtifact(text: string): string | undefined {
   const cleaned = text.replace(/\s+/g, ' ').trim();
   if (!cleaned) return undefined;
   return cleaned.slice(0, 700);
-}
-
-function tokenizeForOverlap(text: string): string[] {
-  const normalized = text.toLowerCase();
-  const latin = normalized.match(/[a-z0-9][a-z0-9_-]{2,}/g) || [];
-  const cjk = normalized.match(/[\u4e00-\u9fff]{2,}/g) || [];
-  const cjkBigrams = cjk.flatMap((chunk) => {
-    const tokens: string[] = [];
-    for (let index = 0; index < chunk.length - 1; index += 1) tokens.push(chunk.slice(index, index + 2));
-    return tokens;
-  });
-  return Array.from(new Set([...latin, ...cjk, ...cjkBigrams]));
 }
 
 function agentLabel(agentId: string): string {

@@ -19,7 +19,8 @@
     "db:logs": "docker compose logs -f postgres",
     "db:migrate:local": "DATABASE_URL=postgres://roundtable:roundtable@localhost:5432/roundtable ROUNDTABLE_TARGET_STORE_DRIVER=postgres_normalized pnpm migrate:postgres",
     "db:smoke:local": "DATABASE_URL=postgres://roundtable:roundtable@localhost:5432/roundtable ROUNDTABLE_STORE_DRIVER=postgres_normalized tsx src/cli/postgres-smoke.ts",
-    "devrt:action": "tsx src/cli/devrt-action.ts"
+    "devrt:action": "tsx src/cli/devrt-action.ts",
+    "memory:sim": "tsx src/cli/memory-sim.ts"
   },
   "dependencies": {
     "@e2b/code-interpreter": "^2.6.1",

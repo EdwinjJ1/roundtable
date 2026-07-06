@@ -13,6 +13,12 @@ import {
   listMessages,
 } from './actions/chat-actions.js';
 import {
+  exportAgentMemory,
+  getAgentMemoryOverview,
+  importAgentMemory,
+  promoteAgentMemoryFact,
+} from './actions/agent-memory-actions.js';
+import {
   getUserProfile,
   listWorkbenchPins,
   pinWorkbench,
@@ -77,6 +83,24 @@ const breakoutsRouter = createTRPCRouter({
       content: z.string().min(1),
     }))
     .mutation(({ ctx, input }) => postBreakoutMessage(ctx.user, input)),
+});
+
+const agentMemoryRouter = createTRPCRouter({
+  overview: protectedProcedure
+    .input(z.object({ chatId: z.string().min(1).optional() }))
+    .query(({ ctx, input }) => getAgentMemoryOverview(ctx.user, input)),
+  export: protectedProcedure
+    .input(z.object({ chatId: z.string().min(1).optional(), agentId: z.string().min(1).optional() }))
+    .query(({ ctx, input }) => exportAgentMemory(ctx.user, input)),
+  import: protectedProcedure
+    .input(z.object({
+      agentId: z.string().min(1),
+      files: z.array(z.object({ slug: z.string().min(1), content: z.string().min(1) })).min(1).max(60),
+    }))
+    .mutation(({ ctx, input }) => importAgentMemory(ctx.user, input)),
+  promote: protectedProcedure
+    .input(z.object({ chatId: z.string().min(1), agentId: z.string().min(1), slug: z.string().min(1) }))
+    .mutation(({ ctx, input }) => promoteAgentMemoryFact(ctx.user, input)),
 });
 
 const artifactsRouter = createTRPCRouter({
@@ -193,6 +217,7 @@ const aiRouter = createTRPCRouter({
 });
 
 export const appRouter = createTRPCRouter({
+  agentMemory: agentMemoryRouter,
   ai: aiRouter,
   artifacts: artifactsRouter,
   breakouts: breakoutsRouter,

@@ -2,6 +2,15 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { readData } from '../store.js';
 import type { AgentEvent, ArtifactKind, PlanTask } from '../types.js';
+import {
+  docPolicyFor,
+  formatMemoryForPrompt,
+  loadAgentMemory,
+  memoryMaintenanceDirective,
+  syncProjectMemoryToGlobal,
+  writeProjectFact,
+} from './agent-memory.js';
+import { extractMemorySection } from './memory-extract.js';
 import { agentForTask, type AgentProfile } from './agent-roster.js';
 import { deliverableText } from './deliverable.js';
 import { runOnE2B } from './adapters/e2b-adapter.js';
@@ -20,6 +29,7 @@ import {
   finishRuntimeConversation,
   runtimeConversationCallbacks,
 } from './runtime-actions.js';
+import { applyDocPolicy, quarantineDocs } from './turns/doc-policy.js';
 import { collectChangedWorkspaceFiles, type ChangedWorkspaceFile } from './turns/workspace-scan.js';
 
 export type AgentRunResult = {
@@ -44,6 +54,8 @@ export async function runAgentTask(input: {
   // Chat the turn belongs to: the scope for CLI session reuse, so consecutive
   // turns in one chat resume the same CLI conversation.
   chatId?: string | null | undefined;
+  // Scopes the agent's GLOBAL memory store (cross-project recall).
+  ownerId?: string | undefined;
   handoffContext?: string | undefined;
   runtimeEnv?: NodeJS.ProcessEnv | undefined;
 }): Promise<AgentRunResult> {
@@ -125,6 +137,7 @@ async function runAgentCliTask(input: {
   message: string;
   turnId?: string | undefined;
   chatId?: string | null | undefined;
+  ownerId?: string | undefined;
   handoffContext?: string | undefined;
   runtimeEnv?: NodeJS.ProcessEnv | undefined;
 }): Promise<AgentRunResult> {
@@ -134,7 +147,12 @@ async function runAgentCliTask(input: {
   // Markdown log — NEVER as .html — and the actual deliverables are collected
   // from the workspace after the run.
   const path = transcriptPathForTask(input.task);
-  const prompt = agentPrompt(agent, input);
+  const ownerId = input.ownerId ?? 'local-user';
+  const memory = await loadAgentMemory({ workspace: input.workspace, agentId: agent.id, ownerId });
+  const prompt = agentPrompt(agent, input, {
+    memoryBlock: formatMemoryForPrompt(memory, `${input.task.title} ${input.task.brief} ${input.message}`),
+    maintenanceBlock: memoryMaintenanceDirective(memory),
+  });
   const data = await readData();
   const runtimeEnv = input.runtimeEnv ?? process.env;
   const runtime = configuredRuntimeForAgent(agent, data.agentRuntimeConfigs, runtimeEnv);
@@ -214,16 +232,64 @@ async function runAgentCliTask(input: {
       ? await collectChangedWorkspaceFiles(input.workspace, startedMs)
       : { files: [], skipped: [] };
     await finishRuntimeConversation(conversation.id, ok ? 'completed' : 'failed', result.error, result.sessionId);
+    // Document policy gate: stray Markdown never becomes an artifact. It is
+    // moved to quarantine and folded into unreviewed memory instead.
+    const policy = applyDocPolicy({ task: input.task, agent, files: scan.files });
+    const quarantine = policy.quarantined.length > 0
+      ? await quarantineDocs({
+          workspace: input.workspace,
+          taskId: input.task.id,
+          agentId: agent.id,
+          quarantined: policy.quarantined,
+        })
+      : { moved: [], folded: [], failed: [] };
+    // Mirror the agent's project memory into its global store so its next
+    // mission — in any project — starts with it. Best-effort: a memory sync
+    // failure must never fail a run that succeeded, but it IS surfaced as an
+    // event — a systemic problem (disk full, permissions) must stay visible.
+    let memorySyncError: string | null = null;
+    const memorySync = ok
+      ? await syncProjectMemoryToGlobal({ workspace: input.workspace, agentId: agent.id, ownerId })
+          .catch((error: unknown) => {
+            memorySyncError = error instanceof Error ? error.message : String(error);
+            return { synced: [], skipped: [] };
+          })
+      : { synced: [], skipped: [] };
     return {
       text,
       path,
       kind: 'markdown',
       ok,
       error: result.error,
-      files: scan.files,
+      files: policy.kept,
       events: [
         ...started,
         ...(staleSessionNote ? [staleSessionNote] : []),
+        ...(quarantine.moved.length > 0
+          ? [{
+              type: 'text_delta',
+              delta: `Document policy: quarantined ${quarantine.moved.length} stray Markdown file(s) — ${quarantine.moved.slice(0, 5).join(', ')}${quarantine.moved.length > 5 ? ', …' : ''} → .roundtable/quarantine/${input.task.id}/ (${quarantine.folded.length} folded into unreviewed memory).`,
+            } as AgentEvent]
+          : []),
+        ...(quarantine.failed.length > 0
+          ? [{
+              type: 'thinking_delta',
+              delta: `Document policy: failed to quarantine ${quarantine.failed.join(', ')} — check workspace filesystem permissions.`,
+            } as AgentEvent]
+          : []),
+        ...(memorySyncError
+          ? [{
+              type: 'thinking_delta',
+              delta: `Memory sync to the global store failed (${memorySyncError}); the run itself is unaffected.`,
+            } as AgentEvent]
+          : []),
+        ...(memorySync.synced.length > 0 || memorySync.skipped.length > 0
+          ? [{
+              type: 'thinking_delta',
+              delta: `Memory: ${memorySync.synced.length} fact(s) synced to ${agent.displayName}'s global store`
+                + (memorySync.skipped.length > 0 ? `; ${memorySync.skipped.length} skipped (store at capacity — compaction pending).` : '.'),
+            } as AgentEvent]
+          : []),
         {
           type: 'tool_result',
           id: toolId,
@@ -237,7 +303,7 @@ async function runAgentCliTask(input: {
           ...(ok ? {} : { isError: true }),
         },
         ...result.events,
-        ...scan.files.map((file): AgentEvent => (
+        ...policy.kept.map((file): AgentEvent => (
           { type: 'file_change', path: file.path, kind: 'edit', diff: `produced ${file.path}` }
         )),
         ...(scan.skipped.length > 0
@@ -249,7 +315,7 @@ async function runAgentCliTask(input: {
         {
           type: 'text_delta',
           delta: ok
-            ? `${agent.displayName} completed via ${runtime}; ${scan.files.length} deliverable file(s) captured, transcript at ${path}.`
+            ? `${agent.displayName} completed via ${runtime}; ${policy.kept.length} deliverable file(s) captured, transcript at ${path}.`
             : `${runtime} failed; captured diagnostic log at ${path}.`,
         },
         ok ? { type: 'done', finishReason: 'completed' } : { type: 'error', message: result.error ?? 'runtime_failed', recoverable: true },
@@ -339,6 +405,7 @@ async function runChatModelTask(
     workspace: string;
     task: PlanTask;
     message: string;
+    ownerId?: string | undefined;
     handoffContext?: string | undefined;
   },
   provider: { name: string; toolName: string; model: string; run: ChatModelRun; isUnavailable: (error: unknown) => boolean },
@@ -347,9 +414,21 @@ async function runChatModelTask(
   const path = pathForTask(input.task);
   const toolId = `tool_${input.task.id}`;
   const system = chatAgentPrompt(agent, input);
-  const user = input.handoffContext
-    ? `Task: ${input.task.title}\n\nContext from earlier agents:\n\n${input.handoffContext}\n\nCreate the next useful output for your role.`
-    : `Task: ${input.task.title}\n\nCreate the next useful output for your role.`;
+  // Chat agents can't write files, so memory is read-only recall for them: it
+  // still lets the agent answer with what it learned in earlier missions.
+  const memory = await loadAgentMemory({
+    workspace: input.workspace,
+    agentId: agent.id,
+    ownerId: input.ownerId ?? 'local-user',
+  });
+  const memoryBlock = formatMemoryForPrompt(memory, `${input.task.title} ${input.task.brief} ${input.message}`);
+  const user = [
+    `Task: ${input.task.title}`,
+    ...(memoryBlock ? ['', memoryBlock] : []),
+    ...(input.handoffContext ? ['', 'Context from earlier agents:', '', input.handoffContext] : []),
+    '',
+    'Create the next useful output for your role.',
+  ].join('\n');
   const started: AgentEvent[] = [
     { type: 'thinking_delta', delta: `${agent.displayName} querying ${provider.model}.` },
     { type: 'tool_use', id: toolId, name: provider.toolName, input: { agentId: agent.id, role: agent.role, path } },
@@ -412,15 +491,42 @@ async function runChatModelTask(
       ];
       rounds += 1;
     } while (rounds <= maxModelContinuations());
+    // The optional trailing `## Memory` section is the chat agent's only write
+    // path into its memory store — capture it and strip it from the deliverable.
+    const extraction = extractMemorySection(combined);
     // Extraction is strict on purpose: a .html artifact holding prose, a raw
     // fence, or a page cut before <body> is worse than a failed task, because a
     // failure feeds the review→fix loop while a garbage artifact ships as
     // "completed".
-    const text = deliverableText(combined, path);
+    const text = deliverableText(extraction.text, path);
     if (text === null || text.length === 0) {
       return failure('deliverable_not_usable', combined);
     }
     await writeWorkspaceFile(input.workspace, path, text);
+    const captured: string[] = [];
+    for (const fact of extraction.facts) {
+      const wrote = await writeProjectFact({
+        workspace: input.workspace,
+        agentId: agent.id,
+        slug: fact.slug,
+        description: fact.description,
+        type: 'note',
+        source: `chat:${input.task.id}`,
+        body: fact.body,
+      }).catch(() => false);
+      if (wrote) captured.push(fact.slug);
+    }
+    let chatSyncError: string | null = null;
+    if (captured.length > 0) {
+      await syncProjectMemoryToGlobal({
+        workspace: input.workspace,
+        agentId: agent.id,
+        ownerId: input.ownerId ?? 'local-user',
+      }).catch((error: unknown) => {
+        chatSyncError = error instanceof Error ? error.message : String(error);
+        return { synced: [], skipped: [] };
+      });
+    }
     const reasoningTokens = (run.usage?.['completion_tokens_details'] as { reasoning_tokens?: number } | undefined)?.reasoning_tokens;
     return {
       text,
@@ -432,6 +538,18 @@ async function runChatModelTask(
         ...started,
         { type: 'tool_result', id: toolId, output: { model: provider.model, reasoningTokens: reasoningTokens ?? 0, chars: text.length } },
         { type: 'file_change', path, kind: 'create', diff: `created ${path}` },
+        ...(captured.length > 0
+          ? [{
+              type: 'thinking_delta',
+              delta: `Memory: captured ${captured.length} fact(s) from the reply — ${captured.join(', ')}.`,
+            } as AgentEvent]
+          : []),
+        ...(chatSyncError
+          ? [{
+              type: 'thinking_delta',
+              delta: `Memory sync to the global store failed (${chatSyncError}); the reply itself is unaffected.`,
+            } as AgentEvent]
+          : []),
         { type: 'text_delta', delta: `${agent.displayName} produced ${path} via ${provider.model}.` },
         { type: 'done', finishReason: 'completed' },
       ],
@@ -449,6 +567,7 @@ async function runMiniMaxTask(input: {
   workspace: string;
   task: PlanTask;
   message: string;
+  ownerId?: string | undefined;
   handoffContext?: string | undefined;
 }): Promise<AgentRunResult> {
   const model = await resolvedMiniMaxModel();
@@ -468,6 +587,7 @@ async function runOpenAICompatTask(input: {
   workspace: string;
   task: PlanTask;
   message: string;
+  ownerId?: string | undefined;
   handoffContext?: string | undefined;
 }): Promise<AgentRunResult> {
   const model = await resolvedOpenAICompatModel();
@@ -734,7 +854,11 @@ function architectInstruction(task: PlanTask): string {
     + 'what belongs in each. Do NOT implement the product itself.';
 }
 
-function agentPrompt(agent: AgentProfile, input: { task: PlanTask; message: string; handoffContext?: string | undefined }): string {
+function agentPrompt(
+  agent: AgentProfile,
+  input: { task: PlanTask; message: string; handoffContext?: string | undefined },
+  extras?: { memoryBlock?: string | undefined; maintenanceBlock?: string | undefined },
+): string {
   const roleInstruction = input.task.stageId === 'answer'
     ? 'Answer the user\'s question directly, using the files in this workspace as reference. '
       + 'Do NOT create, modify, or delete any files and do NOT produce a plan — reply with the answer itself in Markdown.'
@@ -761,6 +885,9 @@ function agentPrompt(agent: AgentProfile, input: { task: PlanTask; message: stri
     input.handoffContext
       ? `Previous agent output:\n\n${input.handoffContext}`
       : 'You are the first agent in this chain.',
+    docPolicyFor(agent),
+    ...(extras?.memoryBlock ? [extras.memoryBlock] : []),
+    ...(extras?.maintenanceBlock ? [extras.maintenanceBlock] : []),
     'Work inside the current working directory. You may inspect and edit files as needed for this role.',
     'Do not touch files outside this working directory.',
     'When finished, print a concise Markdown summary with changed files, commands run, and any blockers.',
@@ -799,6 +926,14 @@ function chatAgentPrompt(
     `You are ${agent.displayName}, the ${agent.role}.`,
     `Instruction: ${roleInstruction}`,
     `Original user request: ${input.message}`,
+    // HTML replies must stay pure HTML — the memory section would corrupt the page.
+    ...(isHtml
+      ? []
+      : [
+          'If (and only if) you learned something durable — a user preference, a project fact, a pattern worth reusing — '
+          + 'end your reply with a "## Memory" section containing at most 3 bullets, each formatted "- slug-name: the fact". '
+          + 'It is captured into your persistent memory and stripped from the deliverable. Omit the section when nothing is worth remembering.',
+        ]),
   ].join('\n\n');
 }
 
