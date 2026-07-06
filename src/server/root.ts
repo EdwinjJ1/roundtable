@@ -4,6 +4,7 @@ import {
   createBreakoutRoom,
   listBreakoutRooms,
   postBreakoutMessage,
+  postDmMessage,
 } from './actions/breakout-actions.js';
 import {
   createChat,
@@ -16,7 +17,6 @@ import {
   exportAgentMemory,
   getAgentMemoryOverview,
   importAgentMemory,
-  promoteAgentMemoryFact,
 } from './actions/agent-memory-actions.js';
 import {
   getUserProfile,
@@ -83,6 +83,15 @@ const breakoutsRouter = createTRPCRouter({
       content: z.string().min(1),
     }))
     .mutation(({ ctx, input }) => postBreakoutMessage(ctx.user, input)),
+  // 1:1 DM with a single agent: find-or-create the (chat, agent) room and post
+  // in one call, so the client never races itself into duplicate rooms.
+  postDm: protectedProcedure
+    .input(z.object({
+      chatId: z.string().min(1),
+      agentId: z.string().min(1),
+      content: z.string().min(1),
+    }))
+    .mutation(({ ctx, input }) => postDmMessage(ctx.user, input)),
 });
 
 const agentMemoryRouter = createTRPCRouter({
@@ -90,17 +99,15 @@ const agentMemoryRouter = createTRPCRouter({
     .input(z.object({ chatId: z.string().min(1).optional() }))
     .query(({ ctx, input }) => getAgentMemoryOverview(ctx.user, input)),
   export: protectedProcedure
-    .input(z.object({ chatId: z.string().min(1).optional(), agentId: z.string().min(1).optional() }))
+    .input(z.object({ chatId: z.string().min(1), agentId: z.string().min(1).optional() }))
     .query(({ ctx, input }) => exportAgentMemory(ctx.user, input)),
   import: protectedProcedure
     .input(z.object({
+      chatId: z.string().min(1),
       agentId: z.string().min(1),
       files: z.array(z.object({ slug: z.string().min(1), content: z.string().min(1) })).min(1).max(60),
     }))
     .mutation(({ ctx, input }) => importAgentMemory(ctx.user, input)),
-  promote: protectedProcedure
-    .input(z.object({ chatId: z.string().min(1), agentId: z.string().min(1), slug: z.string().min(1) }))
-    .mutation(({ ctx, input }) => promoteAgentMemoryFact(ctx.user, input)),
 });
 
 const artifactsRouter = createTRPCRouter({

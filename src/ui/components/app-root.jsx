@@ -463,14 +463,35 @@ function DMArtifact({ artifact, agent }) {
   );
 }
 
-/* ---- DMRoom : click an agent to open their 1:1 room. Two tabs — Chat (steer /
-   private note) and Work (what they actually produced on this run). --------- */
-function DMRoom({ agent, activeTask, work, onClose }) {
-  if (!agent) return null;
+/* ---- DMRoom : click an agent to open their 1:1 room. Two tabs — Chat (a real
+   private thread: messages persist server-side and the agent answers with the
+   live main-chat context injected) and Work (what they actually produced on
+   this run). `room` is the server bundle; `onSend` is null when there is no
+   live chat to anchor the thread to (logged-out demo / no mission yet). ----- */
+function DMRoom({ agent, working, work, room, onSend, sending, sendFailed, onClose }) {
   const [tab, setTab] = useState('chat');
   const [val, setVal] = useState('');
-  const steering = !!activeTask;
-  const redirects = ['Use Postgres, not SQLite', 'Add rate limiting', 'Keep it server-rendered'];
+  // postDm resolves only after the agent's reply is stored, so the just-sent
+  // note isn't in room.messages yet — keep it on screen until the rooms
+  // refetch actually delivers it (not merely until the request settles).
+  const [pendingNote, setPendingNote] = useState(null);
+  const scrollRef = useRef(null);
+  const messages = room?.messages || [];
+  useEffect(() => { setPendingNote(null); }, [messages.length]);
+  useEffect(() => { if (!sending && sendFailed) setPendingNote(null); }, [sending, sendFailed]);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length, pendingNote, sending, tab]);
+  if (!agent) return null;
+  const canSend = !!onSend;
+  const send = () => {
+    const text = val.trim();
+    if (!text || !canSend || sending) return;
+    onSend(text);
+    setPendingNote(text);
+    setVal('');
+  };
   const workCount = (work?.tasks?.length || 0) + (work?.artifacts?.length || 0);
   const tabBtn = (id, label, count) => (
     <button onClick={() => setTab(id)} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px',
@@ -498,7 +519,7 @@ function DMRoom({ agent, activeTask, work, onClose }) {
           <button onClick={onClose} style={iconBtn}><Icon name="x" size={15} /></button>
         </div>
         <div style={{ display: 'flex', gap: 7, padding: '10px 15px 4px' }}>
-          {tabBtn('chat', steering ? 'Steer' : 'Chat')}
+          {tabBtn('chat', 'Chat', messages.length)}
           {tabBtn('work', 'Work', workCount)}
         </div>
         {tab === 'work' ? (
@@ -507,36 +528,74 @@ function DMRoom({ agent, activeTask, work, onClose }) {
           </div>
         ) : (
           <>
-            <div style={{ flex: 1, overflowY: 'auto', padding: '16px 15px', display: 'flex', flexDirection: 'column', gap: 12, background: 'var(--bg)' }}>
-              {steering && (
+            <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '16px 15px', display: 'flex', flexDirection: 'column', gap: 12, background: 'var(--bg)' }}>
+              {working && (
                 <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start', padding: '10px 12px', borderRadius: 'var(--r-sm)',
                   background: tint(agent.color, 9), border: `1px solid ${alpha(agent.color, 35)}` }}>
                   <Spinner size={15} color={agent.color} />
                   <div style={{ fontSize: 12.5, color: 'var(--text)' }}>
-                    <b>Working on {activeTask}</b> right now. A note here steers the live task without stopping the table.</div>
+                    <b>{agent.displayName} is at the table working</b> right now. This side-thread doesn’t interrupt the run — replies use the live table context.</div>
                 </div>
               )}
-              <div style={{ display: 'flex', gap: 9 }}>
-                <Avatar agent={agent} size={26} />
-                <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '4px 12px 12px 12px',
-                  padding: '9px 12px', fontSize: 13.5, color: 'var(--text)', maxWidth: '80%' }}>
-                  {steering ? 'Mid-build — tell me what to change and I’ll fold it in.' : 'Hey — what would you like to go over, just the two of us?'}</div>
-              </div>
-            </div>
-            {steering && (
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '0 13px 4px' }}>
-                {redirects.map((r) => (
-                  <button key={r} onClick={() => setVal(r)} style={{ padding: '5px 10px', borderRadius: 999, cursor: 'pointer',
-                    border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-muted)', font: 'inherit', fontSize: 11.5 }}>{r}</button>
+              {messages.length === 0 && !pendingNote && (
+                <div style={{ display: 'flex', gap: 9 }}>
+                  <Avatar agent={agent} size={26} />
+                  <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '4px 12px 12px 12px',
+                    padding: '9px 12px', fontSize: 13.5, color: 'var(--text)', maxWidth: '80%' }}>
+                    Hey — what would you like to go over, just the two of us?</div>
+                </div>
+              )}
+              {messages.map((m) => m.authorType === 'user'
+                ? (
+                  <div key={m.id} style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <div style={{ background: 'var(--accent)', color: '#fff', borderRadius: '12px 4px 12px 12px',
+                      padding: '9px 12px', fontSize: 13.5, maxWidth: '80%', whiteSpace: 'pre-wrap' }}>{m.content}</div>
+                  </div>
+                )
+                : (
+                  <div key={m.id} style={{ display: 'flex', gap: 9 }}>
+                    <Avatar agent={agent} size={26} />
+                    <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '4px 12px 12px 12px',
+                      padding: '9px 12px', fontSize: 13.5, color: 'var(--text)', maxWidth: '80%' }}><Md text={m.content} /></div>
+                  </div>
                 ))}
-              </div>
+              {pendingNote && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <div style={{ background: 'var(--accent)', color: '#fff', borderRadius: '12px 4px 12px 12px', opacity: .75,
+                    padding: '9px 12px', fontSize: 13.5, maxWidth: '80%', whiteSpace: 'pre-wrap' }}>{pendingNote}</div>
+                </div>
+              )}
+              {sending && (
+                <div style={{ display: 'flex', gap: 9, alignItems: 'center' }}>
+                  <Avatar agent={agent} size={26} />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--surface)', border: '1px solid var(--border)',
+                    borderRadius: '4px 12px 12px 12px', padding: '9px 12px' }}>
+                    <Spinner size={13} color={agent.color} />
+                    <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{agent.displayName} is replying…</span>
+                  </div>
+                </div>
+              )}
+              {sendFailed && !sending && (
+                <div style={{ fontSize: 11.5, color: 'var(--bad)', textAlign: 'center' }}>
+                  Message didn’t go through — try again.</div>
+              )}
+            </div>
+            {!canSend && (
+              <div style={{ padding: '8px 13px 0', fontSize: 11.5, color: 'var(--text-faint)' }}>
+                Start a mission first — private chats anchor to the live table.</div>
             )}
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 9, padding: '11px 13px', borderTop: '1px solid var(--border)' }}>
-              <textarea value={val} onChange={(e) => setVal(e.target.value)} rows={1} placeholder={steering ? `Redirect ${agent.displayName}…` : `Message ${agent.displayName} privately…`}
+              <textarea value={val} onChange={(e) => setVal(e.target.value)} rows={1} disabled={!canSend}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+                placeholder={canSend ? `Message ${agent.displayName} privately…` : 'Private chat unlocks with a live mission'}
                 style={{ flex: 1, resize: 'none', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)',
-                  font: 'inherit', fontSize: 13.5, color: 'var(--text)', padding: '9px 11px', outline: 'none', maxHeight: 100 }} />
-              <button onClick={() => setVal('')} style={{ display: 'grid', placeItems: 'center', width: 38, height: 38, borderRadius: 'var(--r-sm)',
-                border: 'none', cursor: 'pointer', background: 'var(--accent)', color: '#fff', flexShrink: 0 }}><Icon name="send" size={16} /></button>
+                  font: 'inherit', fontSize: 13.5, color: 'var(--text)', padding: '9px 11px', outline: 'none', maxHeight: 100,
+                  opacity: canSend ? 1 : .6 }} />
+              <button onClick={send} disabled={!canSend || sending || !val.trim()}
+                style={{ display: 'grid', placeItems: 'center', width: 38, height: 38, borderRadius: 'var(--r-sm)',
+                  border: 'none', cursor: canSend && !sending && val.trim() ? 'pointer' : 'default', background: 'var(--accent)', color: '#fff',
+                  flexShrink: 0, opacity: canSend && !sending && val.trim() ? 1 : .45 }}>
+                {sending ? <Spinner size={15} color="#fff" /> : <Icon name="send" size={16} />}</button>
             </div>
           </>
         )}
@@ -818,6 +877,9 @@ function App() {
     addWorkbenchPin,
     removeWorkbenchPin,
   ]);
+  const postDmMessage = trpc.breakouts.postDm.useMutation({
+    onSettled: () => { if (activeChatId) trpcUtils.breakouts.listRooms.invalidate({ chatId: activeChatId }); },
+  });
   const agents = useMemo(() => palettize(t.palette), [t.palette, memberIds]);
   const railWorkbench = authed && activeWorkbench
     ? { ...activeWorkbench, members: RT.WORKBENCH.members }
@@ -1261,7 +1323,8 @@ function App() {
   const demoBreakoutData = RT.SCRIPT.find((b) => b.kind === 'breakout');
   // When authed with a live room, drive the modal from the server bundle;
   // otherwise fall back to the scripted demo room (marketing / logged-out view).
-  const liveBreakoutRoom = liveBreakoutRooms && liveBreakoutRooms.length ? liveBreakoutRooms[0] : null;
+  // Single-participant rooms are DMs and belong to the DMRoom panel, not here.
+  const liveBreakoutRoom = liveBreakoutRooms?.find((room) => room.participantAgentIds.length === 2) || null;
   const breakoutData = liveBreakoutRoom
     ? {
         id: liveBreakoutRoom.id,
@@ -1278,6 +1341,16 @@ function App() {
   const sendBreakoutNote = (text) => {
     if (!liveBreakoutRoom) return;
     postBreakoutMessage.mutate({ roomId: liveBreakoutRoom.id, content: text });
+  };
+  // The open agent's DM thread, straight from the rooms query — refetched after
+  // each postDm settles, which is how the agent's reply lands on screen.
+  const dmRoom = dmAgent && liveBreakoutRooms
+    ? liveBreakoutRooms.find((room) =>
+        room.status === 'open' && room.participantAgentIds.length === 1 && room.participantAgentIds[0] === dmAgent) || null
+    : null;
+  const sendDmMessage = (text) => {
+    if (!activeChatId || !dmAgent) return;
+    postDmMessage.mutate({ chatId: activeChatId, agentId: dmAgent, content: text });
   };
 
   return (
@@ -1424,8 +1497,10 @@ function App() {
         onEnterAuto={() => { setHubOpen(false); setBreakoutOpen(true); }}
         onStartDM={(id) => { setHubOpen(false); setDmAgent(id); }} onClose={() => setHubOpen(false)} />}
       {dmAgent && <DMRoom agent={agents[dmAgent]}
-        activeTask={(['working', 'speaking', 'thinking'].includes(st.status[dmAgent])) ? (RT.PLAN.tasks.find((tk) => tk.owner === dmAgent) || {}).id : null}
+        working={['working', 'speaking', 'thinking'].includes(st.status[dmAgent])}
         work={agentWorkFor(dmAgent, latestTurnResult)}
+        room={dmRoom} onSend={authed && activeChatId ? sendDmMessage : null}
+        sending={postDmMessage.isPending} sendFailed={postDmMessage.isError}
         onClose={() => setDmAgent(null)} />}
       {modal === 'task' && <NewTaskModal workbench={railWorkbench} members={memberIds} agents={agents}
         suggestionContext={missionSuggestionContext}

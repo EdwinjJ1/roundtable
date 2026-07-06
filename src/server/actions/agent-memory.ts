@@ -2,12 +2,12 @@
   Per-agent persistent memory, modeled on the Claude Code harness memory format:
   one fact per Markdown file with frontmatter (name/description/type/source),
   plus a MEMORY.md index with one line per fact. Plain files, no store coupling,
-  so a memory folder can be zipped, shared, or dropped into another project.
+  so a memory folder can be exported and imported into another project.
 
-  Two scopes:
-  - project:  <workspace>/.roundtable/agents/<agentId>/memory/   (this codebase)
-  - global:   $ROUNDTABLE_MEMORY_ROOT/<ownerId>/agents/<agentId>/memory/
-              (defaults to ~/.roundtable/memory; follows the agent across projects)
+  ONE scope, by deliberate product decision: memory lives in the project
+  workspace (<workspace>/.roundtable/agents/<agentId>/memory/) and never leaves
+  it on its own. There is no global store and no automatic cross-project
+  sharing — moving memory between projects is an explicit export/import.
 
   Every file has a hard budget. Injection ALWAYS stays inside the prompt budget
   (deterministic truncation); files over their own budget are never rewritten by
@@ -20,8 +20,7 @@
 */
 
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import type { AgentProfile } from './agent-roster.js';
 import { tokenizeForOverlap } from './text-overlap.js';
 
@@ -38,16 +37,13 @@ export const MEMORY_LIMITS = {
   injectPlanLines: 40,
 } as const;
 
-export type MemoryScope = 'global' | 'project';
-
 export type MemoryFactType = 'preference' | 'pattern' | 'project' | 'reference' | 'unreviewed' | 'note';
 
 export type MemoryFact = {
-  scope: MemoryScope;
   slug: string;
   description: string;
   // From frontmatter `type:`; 'unreviewed' marks auto-captured content (e.g.
-  // quarantined stray docs) that stays project-scoped until an audit clears it.
+  // quarantined stray docs) awaiting the architect's audit.
   type: MemoryFactType;
   text: string;
   lines: number;
@@ -72,13 +68,8 @@ export function projectPlanPath(workspace: string, agentId: string): string {
   return join(workspace, '.roundtable', 'agents', sanitizeSegment(agentId), 'plan.md');
 }
 
-export function globalMemoryDir(ownerId: string, agentId: string): string {
-  const root = process.env.ROUNDTABLE_MEMORY_ROOT || join(homedir(), '.roundtable', 'memory');
-  return resolve(root, sanitizeSegment(ownerId), 'agents', sanitizeSegment(agentId), 'memory');
-}
-
-// Owner/agent ids come from the store, but they end up in filesystem paths —
-// never let a crafted id escape the memory root.
+// Agent ids come from the roster, but they end up in filesystem paths — never
+// let a crafted id escape the agents directory.
 function sanitizeSegment(value: string): string {
   const cleaned = value.replace(/[^a-zA-Z0-9_@.-]/g, '_');
   return cleaned && cleaned !== '.' && cleaned !== '..' ? cleaned : 'unknown';
@@ -114,20 +105,14 @@ function withDirLock<T>(dir: string, run: () => Promise<T>): Promise<T> {
 }
 
 export async function loadAgentMemory(input: {
-  // null → global scope only (no chat workspace to read project memory from).
+  // null → no chat workspace to read from; the memory is simply empty.
   workspace: string | null;
   agentId: string;
-  ownerId: string;
 }): Promise<AgentMemory> {
-  const [globalFacts, projectFacts, plan] = await Promise.all([
-    readFactsFrom(globalMemoryDir(input.ownerId, input.agentId), 'global'),
-    input.workspace ? readFactsFrom(projectMemoryDir(input.workspace, input.agentId), 'project') : Promise.resolve([]),
+  const [facts, plan] = await Promise.all([
+    input.workspace ? readFactsFrom(projectMemoryDir(input.workspace, input.agentId)) : Promise.resolve([]),
     input.workspace ? readFileOrNull(projectPlanPath(input.workspace, input.agentId)) : Promise.resolve(null),
   ]);
-  // Project wins on slug collision: it is the more specific, fresher scope.
-  const bySlug = new Map<string, MemoryFact>();
-  for (const fact of [...globalFacts, ...projectFacts]) bySlug.set(fact.slug, fact);
-  const facts = [...bySlug.values()];
   const planLines = plan ? plan.split('\n').length : 0;
   return {
     agentId: input.agentId,
@@ -138,7 +123,7 @@ export async function loadAgentMemory(input: {
   };
 }
 
-async function readFactsFrom(dir: string, scope: MemoryScope): Promise<MemoryFact[]> {
+async function readFactsFrom(dir: string): Promise<MemoryFact[]> {
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
   // Read PAST the store cap (2x) so an overshot store is visible to capacity
   // checks and compaction detection instead of silently hiding the overflow;
@@ -155,7 +140,6 @@ async function readFactsFrom(dir: string, scope: MemoryScope): Promise<MemoryFac
     const lines = raw.split('\n').length;
     const bytes = Buffer.byteLength(raw, 'utf8');
     return {
-      scope,
       slug,
       description: factDescription(raw, slug),
       type: factType(raw),
@@ -197,26 +181,19 @@ function collectCompactionNeeds(facts: MemoryFact[], planLines: number): string[
   const needs: string[] = [];
   for (const fact of facts.filter((item) => item.overLimit)) {
     needs.push(
-      `${fact.scope}/${fact.slug}.md is ${fact.lines} lines / ${fact.bytes} bytes `
+      `${fact.slug}.md is ${fact.lines} lines / ${fact.bytes} bytes `
       + `(budget: ${MEMORY_LIMITS.factMaxLines} lines / ${MEMORY_LIMITS.factMaxBytes} bytes) — rewrite it tighter.`,
     );
   }
-  const projectFacts = facts.filter((fact) => fact.scope === 'project');
-  if (projectFacts.length > MEMORY_LIMITS.storeMaxFacts - 5) {
+  if (facts.length > MEMORY_LIMITS.storeMaxFacts - 5) {
     needs.push(
-      `you have ${projectFacts.length} project memory files (cap: ${MEMORY_LIMITS.storeMaxFacts}) — merge overlapping facts and delete stale ones.`,
+      `you have ${facts.length} memory files (cap: ${MEMORY_LIMITS.storeMaxFacts}) — merge overlapping facts and delete stale ones.`,
     );
   }
-  const totalBytes = projectFacts.reduce((sum, fact) => sum + fact.bytes, 0);
+  const totalBytes = facts.reduce((sum, fact) => sum + fact.bytes, 0);
   if (totalBytes > MEMORY_LIMITS.storeMaxBytes) {
     needs.push(
-      `project memory totals ${totalBytes} bytes (cap: ${MEMORY_LIMITS.storeMaxBytes}) — consolidate before adding more.`,
-    );
-  }
-  const globalFacts = facts.filter((fact) => fact.scope === 'global');
-  if (globalFacts.length > MEMORY_LIMITS.storeMaxFacts) {
-    needs.push(
-      `your global store holds ${globalFacts.length} facts (cap: ${MEMORY_LIMITS.storeMaxFacts}) — merge or retire global facts so new ones can sync.`,
+      `memory totals ${totalBytes} bytes (cap: ${MEMORY_LIMITS.storeMaxBytes}) — consolidate before adding more.`,
     );
   }
   if (planLines > MEMORY_LIMITS.planMaxLines) {
@@ -239,7 +216,7 @@ export function selectMemoryForTask(memory: AgentMemory, taskText: string): Memo
     .map((fact, index) => {
       const overlap = tokenizeForOverlap(`${fact.slug} ${fact.description} ${fact.text}`)
         .filter((token) => query.has(token)).length;
-      return { fact, overlap, score: overlap + (fact.scope === 'global' ? 0.5 : 0) - index * 0.001 };
+      return { fact, overlap, score: overlap - index * 0.001 };
     })
     // A single shared token is noise ("the", one CJK bigram); require two,
     // matching the breakout classifier's relevance threshold.
@@ -278,18 +255,18 @@ export function formatMemoryForPrompt(memory: AgentMemory, taskText: string): st
   const selected = selectMemoryForTask(memory, taskText);
   const indexLines = memory.facts
     .slice(0, MEMORY_LIMITS.indexMaxEntries)
-    .map((fact) => `- [${fact.scope}] ${fact.slug} — ${fact.description}`);
+    .map((fact) => `- ${fact.slug} — ${fact.description}`);
   const planHead = memory.plan
     ? memory.plan.split('\n').slice(0, MEMORY_LIMITS.injectPlanLines).join('\n').trim()
     : '';
   return [
-    '# Your memory',
+    '# Your memory (this project)',
     '',
     'Notes you wrote in earlier runs. They reflect the state when written — verify anything critical before relying on it.',
     '',
     ...(indexLines.length > 0 ? ['Index:', ...indexLines, ''] : []),
     ...(selected.length > 0
-      ? selected.flatMap((fact) => [`## ${fact.slug} (${fact.scope})`, '', fact.text, ''])
+      ? selected.flatMap((fact) => [`## ${fact.slug}`, '', fact.text, ''])
       : []),
     ...(planHead ? ['## Your plan (plan.md)', '', planHead, ''] : []),
   ].join('\n').trim();
@@ -337,19 +314,18 @@ export function docPolicyFor(agent: AgentProfile): string {
 }
 
 /*
-  Import fact files into the actor's GLOBAL store for one agent — the receiving
-  end of an exported memory bundle. Same capacity semantics as the run-time
-  sync: updates always land, new slugs need free capacity.
+  Import fact files into one agent's memory in THIS project — the receiving end
+  of an exported bundle. Updates always land, new slugs need free capacity.
 */
-export async function importGlobalFacts(input: {
-  ownerId: string;
+export async function importProjectFacts(input: {
+  workspace: string;
   agentId: string;
   files: Array<{ slug: string; content: string }>;
 }): Promise<{ imported: string[]; skipped: string[] }> {
-  const dir = globalMemoryDir(input.ownerId, input.agentId);
+  const dir = projectMemoryDir(input.workspace, input.agentId);
   return withDirLock(dir, async () => {
     await mkdir(dir, { recursive: true });
-    const existing = new Set((await readFactsFrom(dir, 'global')).map((fact) => fact.slug));
+    const existing = new Set((await readFactsFrom(dir)).map((fact) => fact.slug));
     const imported: string[] = [];
     const skipped: string[] = [];
     let capacity = MEMORY_LIMITS.storeMaxFacts - existing.size;
@@ -377,86 +353,9 @@ export async function importGlobalFacts(input: {
   });
 }
 
-/*
-  User-confirmed promotion of one project fact into the global store. An
-  unreviewed fact becomes a plain note on promotion — the confirmation IS the
-  review. Returns a status instead of throwing so the route can surface
-  "store full" as a normal outcome, not an error page.
-*/
-export async function promoteFactToGlobal(input: {
-  workspace: string;
-  ownerId: string;
-  agentId: string;
-  slug: string;
-}): Promise<'promoted' | 'not_found' | 'store_full'> {
-  const projectFacts = await readFactsFrom(projectMemoryDir(input.workspace, input.agentId), 'project');
-  const fact = projectFacts.find((item) => item.slug === input.slug);
-  if (!fact) return 'not_found';
-  const dir = globalMemoryDir(input.ownerId, input.agentId);
-  return withDirLock(dir, async () => {
-    await mkdir(dir, { recursive: true });
-    const globalFacts = await readFactsFrom(dir, 'global');
-    const isUpdate = globalFacts.some((item) => item.slug === fact.slug);
-    if (!isUpdate && globalFacts.length >= MEMORY_LIMITS.storeMaxFacts) return 'store_full';
-    const text = fact.type === 'unreviewed'
-      ? fact.text.replace(/^(---\n[\s\S]*?\btype:\s*)unreviewed(\n[\s\S]*?\n---)/, '$1note$2')
-      : fact.text;
-    await writeFile(join(dir, `${fact.slug}.md`), text, 'utf8');
-    await rebuildMemoryIndex(dir);
-    return 'promoted';
-  });
-}
-
-/*
-  After a successful run, mirror the agent's project facts into its global
-  store so the next mission — in any project — starts with them. Upsert by
-  slug; when the global store is at capacity, new slugs are skipped (never
-  evicted) and the agent keeps seeing a compaction directive instead. The
-  global MEMORY.md index is rebuilt from the merged set.
-*/
-export async function syncProjectMemoryToGlobal(input: {
-  workspace: string;
-  agentId: string;
-  ownerId: string;
-}): Promise<{ synced: string[]; skipped: string[] }> {
-  // Unreviewed facts (auto-captured stray docs) stay project-scoped until an
-  // audit clears them — the global store holds only deliberate memory.
-  const projectFacts = (await readFactsFrom(projectMemoryDir(input.workspace, input.agentId), 'project'))
-    .filter((fact) => fact.type !== 'unreviewed');
-  if (projectFacts.length === 0) return { synced: [], skipped: [] };
-  const dir = globalMemoryDir(input.ownerId, input.agentId);
-  return withDirLock(dir, async () => {
-    await mkdir(dir, { recursive: true });
-    const globalFacts = await readFactsFrom(dir, 'global');
-    const existing = new Set(globalFacts.map((fact) => fact.slug));
-
-    const synced: string[] = [];
-    const skipped: string[] = [];
-    let capacity = MEMORY_LIMITS.storeMaxFacts - existing.size;
-    for (const fact of projectFacts) {
-      const isUpdate = existing.has(fact.slug);
-      if (!isUpdate && capacity <= 0) {
-        skipped.push(fact.slug);
-        continue;
-      }
-      await writeFile(join(dir, `${fact.slug}.md`), fact.text, 'utf8');
-      synced.push(fact.slug);
-      if (!isUpdate) capacity -= 1;
-    }
-
-    await rebuildMemoryIndex(dir, skipped.length > 0
-      ? `<!-- ${skipped.length} fact(s) not synced: store at capacity (${MEMORY_LIMITS.storeMaxFacts}). Compact to make room. -->`
-      : undefined);
-    return { synced, skipped };
-  });
-}
-
-async function rebuildMemoryIndex(dir: string, footnote?: string): Promise<void> {
-  const facts = await readFactsFrom(dir, 'global');
-  const index = [
-    ...facts.map((fact) => `- [${fact.slug}](${fact.slug}.md) — ${fact.description}`),
-    ...(footnote ? ['', footnote] : []),
-  ].join('\n');
+async function rebuildMemoryIndex(dir: string): Promise<void> {
+  const facts = await readFactsFrom(dir);
+  const index = facts.map((fact) => `- [${fact.slug}](${fact.slug}.md) — ${fact.description}`).join('\n');
   await writeFile(join(dir, 'MEMORY.md'), `${index}\n`, 'utf8');
 }
 
@@ -464,8 +363,8 @@ async function rebuildMemoryIndex(dir: string, footnote?: string): Promise<void>
   System-side fact writer: keeps the file format (frontmatter + body + budgets)
   in one place for callers that capture memory on the agent's behalf — the
   chat-model `## Memory` extractor and the stray-doc quarantine fold. Returns
-  false when the project store is at capacity for a NEW slug (the caller keeps
-  its source content; nothing is lost).
+  false when the store is at capacity for a NEW slug (the caller keeps its
+  source content; nothing is lost).
 */
 export async function writeProjectFact(input: {
   workspace: string;
@@ -479,7 +378,7 @@ export async function writeProjectFact(input: {
   const dir = projectMemoryDir(input.workspace, input.agentId);
   const slug = memorySlug(input.slug) || 'fact';
   return withDirLock(dir, async () => {
-    const existing = await readFactsFrom(dir, 'project');
+    const existing = await readFactsFrom(dir);
     const isUpdate = existing.some((fact) => fact.slug === slug);
     if (!isUpdate && existing.length >= MEMORY_LIMITS.storeMaxFacts) return false;
     const body = Buffer.byteLength(input.body, 'utf8') > MEMORY_LIMITS.factMaxBytes

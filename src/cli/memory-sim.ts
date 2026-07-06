@@ -1,21 +1,24 @@
 /*
   memory-sim — end-to-end simulation of the agent memory + document governance
   pipeline against REAL runtime plumbing (runAgentTask → executeCliRuntime →
-  workspace scan → doc policy → memory sync), with a scripted Node process
-  standing in for the coding CLI.
+  workspace scan → doc policy), with a scripted Node process standing in for
+  the coding CLI.
 
   Run: pnpm memory:sim   (or: npx tsx src/cli/memory-sim.ts)
+
+  Memory is strictly per-project: nothing syncs anywhere on its own; the only
+  way facts travel between projects is the explicit export → import exercised
+  in scenario 5.
 
   Scenarios
   1. Mission in project A: agent ships code, leaves stray Markdown, writes one
      memory fact → deliverables kept, strays quarantined + folded as unreviewed,
-     fact synced to the global store.
-  2. Mission in project B (fresh workspace): the agent's prompt carries the
-     global fact (cross-project recall) and the document policy — and NOT the
-     unreviewed noise.
+     the deliberate fact persists in the project store.
+  2. Second run in project A: the agent's prompt carries the fact from run 1
+     (cross-run recall) and the document policy.
   3. Oversized memory file → the next prompt carries a compaction directive.
-  4. Chat-model reply with a `## Memory` section → captured, stripped, synced.
-  5. Export/import roundtrip into a second user's store, owner-isolated.
+  4. Chat-model reply with a `## Memory` section → captured, stripped, stored.
+  5. Export from project A → import into project B (deliberate portability).
 */
 
 import './load-env.js';
@@ -23,11 +26,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  globalMemoryDir,
   loadAgentMemory,
-  importGlobalFacts,
+  importProjectFacts,
   projectMemoryDir,
-  syncProjectMemoryToGlobal,
   writeProjectFact,
   MEMORY_LIMITS,
 } from '../server/actions/agent-memory.js';
@@ -37,7 +38,6 @@ import { saveAgentRuntimeConfig } from '../server/actions/runtime-actions.js';
 import { resetData } from '../server/store.js';
 import type { PlanTask } from '../server/types.js';
 
-const OWNER = 'sim-user';
 const AGENT = 'atlas';
 
 type Check = { name: string; ok: boolean; detail?: string };
@@ -107,7 +107,6 @@ async function scenario1(workspaceA: string): Promise<void> {
     task: task('task_sim_build'),
     turnId: 'turn-sim-1',
     chatId: 'chat-sim-a',
-    ownerId: OWNER,
   });
 
   const filePaths = (result.files ?? []).map((file) => file.path);
@@ -121,39 +120,33 @@ async function scenario1(workspaceA: string): Promise<void> {
   check(checks, 'quarantine surfaced as an event',
     result.events.some((event) => event.type === 'text_delta' && event.delta.includes('Document policy')));
 
-  const projectMemory = await loadAgentMemory({ workspace: workspaceA, agentId: AGENT, ownerId: OWNER });
+  const memory = await loadAgentMemory({ workspace: workspaceA, agentId: AGENT });
   check(checks, 'stray content folded into unreviewed memory',
-    projectMemory.facts.some((fact) => fact.slug === 'unreviewed-notes' && fact.type === 'unreviewed'));
-
-  const globalMemory = await loadAgentMemory({ workspace: null, agentId: AGENT, ownerId: OWNER });
-  check(checks, 'deliberate fact synced to the global store',
-    globalMemory.facts.some((fact) => fact.slug === 'lens-scoring-weights'));
-  check(checks, 'unreviewed noise NOT synced to the global store',
-    !globalMemory.facts.some((fact) => fact.type === 'unreviewed'));
+    memory.facts.some((fact) => fact.slug === 'unreviewed-notes' && fact.type === 'unreviewed'));
+  check(checks, 'deliberate fact persists in the project store',
+    memory.facts.some((fact) => fact.slug === 'lens-scoring-weights'));
   results.push({ scenario: 'S1 project A: governance during a real run', checks });
 }
 
-async function scenario2(workspaceB: string): Promise<void> {
+async function scenario2(workspaceA: string): Promise<void> {
   const checks: Check[] = [];
   await configureRuntime(ECHO_SCRIPT);
   const result = await runAgentTask({
     adapter: 'agent-cli',
-    workspace: workspaceB,
+    workspace: workspaceA,
     message: 'Improve the lens ranking site scoring',
-    task: task('task_sim_recall', { id: 'task_sim_recall' }),
+    task: task('task_sim_recall'),
     turnId: 'turn-sim-2',
-    chatId: 'chat-sim-b',
-    ownerId: OWNER,
+    chatId: 'chat-sim-a',
   });
-  const prompt = await readFile(join(workspaceB, '.roundtable', 'prompt-capture.txt'), 'utf8').catch(() => '');
+  const prompt = await readFile(join(workspaceA, '.roundtable', 'prompt-capture.txt'), 'utf8').catch(() => '');
   check(checks, 'run succeeds', result.ok, result.error ?? undefined);
-  check(checks, 'prompt carries the memory block', prompt.includes('# Your memory'));
-  check(checks, 'global fact recalled across projects', prompt.includes('lens-scoring-weights'));
+  check(checks, 'prompt carries the memory block', prompt.includes('# Your memory (this project)'));
+  check(checks, 'fact from the earlier run recalled', prompt.includes('lens-scoring-weights'));
   check(checks, 'fact BODY injected (relevance-selected)', prompt.includes('Sharpness 40%'));
   check(checks, 'document policy present', prompt.includes('# Document policy'));
-  check(checks, 'unreviewed noise not recalled', !prompt.includes('unreviewed-notes'));
   check(checks, 'no compaction directive when memory is healthy', !prompt.includes('# Memory maintenance'));
-  results.push({ scenario: 'S2 project B: cross-project recall via global store', checks });
+  results.push({ scenario: 'S2 project A: cross-run recall within the project', checks });
 }
 
 async function scenario3(workspaceB: string): Promise<void> {
@@ -176,7 +169,6 @@ async function scenario3(workspaceB: string): Promise<void> {
     task: task('task_sim_compact'),
     turnId: 'turn-sim-3',
     chatId: 'chat-sim-b',
-    ownerId: OWNER,
   });
   const prompt = await readFile(join(workspaceB, '.roundtable', 'prompt-capture.txt'), 'utf8').catch(() => '');
   check(checks, 'run succeeds', result.ok, result.error ?? undefined);
@@ -209,34 +201,37 @@ async function scenario4(workspaceB: string): Promise<void> {
       body: fact.body,
     });
   }
-  await syncProjectMemoryToGlobal({ workspace: workspaceB, agentId: AGENT, ownerId: OWNER });
-  const globalMemory = await loadAgentMemory({ workspace: null, agentId: AGENT, ownerId: OWNER });
-  check(checks, 'chat-captured fact reaches the global store',
-    globalMemory.facts.some((fact) => fact.slug === 'user-wants-sharpness-first'));
+  const memory = await loadAgentMemory({ workspace: workspaceB, agentId: AGENT });
+  check(checks, 'chat-captured fact lands in the project store',
+    memory.facts.some((fact) => fact.slug === 'user-wants-sharpness-first'));
   results.push({ scenario: 'S4 chat reply: ## Memory capture path', checks });
 }
 
-async function scenario5(): Promise<void> {
+async function scenario5(workspaceA: string, workspaceB: string): Promise<void> {
   const checks: Check[] = [];
-  const source = await loadAgentMemory({ workspace: null, agentId: AGENT, ownerId: OWNER });
+  const source = await loadAgentMemory({ workspace: workspaceA, agentId: AGENT });
   const bundle = source.facts.map((fact) => ({ slug: fact.slug, content: fact.text }));
-  check(checks, 'export bundle contains the earned facts', bundle.length >= 2, `got ${bundle.length}`);
+  check(checks, 'export bundle contains project A facts', bundle.length >= 2, `got ${bundle.length}`);
 
-  const imported = await importGlobalFacts({ ownerId: 'sim-user-2', agentId: AGENT, files: bundle });
-  check(checks, 'bundle imports into a second user store', imported.imported.length === bundle.length, imported.skipped.join(', '));
+  const imported = await importProjectFacts({ workspace: workspaceB, agentId: AGENT, files: bundle });
+  check(checks, 'bundle imports into project B', imported.imported.length === bundle.length, imported.skipped.join(', '));
 
-  const target = await loadAgentMemory({ workspace: null, agentId: AGENT, ownerId: 'sim-user-2' });
-  check(checks, 'imported facts readable with an index', target.facts.length === bundle.length);
-  const indexExists = await exists(join(globalMemoryDir('sim-user-2', AGENT), 'MEMORY.md'));
+  const target = await loadAgentMemory({ workspace: workspaceB, agentId: AGENT });
+  check(checks, 'imported facts readable in project B',
+    target.facts.some((fact) => fact.slug === 'lens-scoring-weights'));
+  const indexExists = await exists(join(projectMemoryDir(workspaceB, AGENT), 'MEMORY.md'));
   check(checks, 'MEMORY.md index rebuilt on import', indexExists);
-  results.push({ scenario: 'S5 export/import: portable memory bundle', checks });
+
+  // Nothing crossed on its own: project B only has what the import delivered.
+  check(checks, 'no automatic cross-project leakage before import happened',
+    !source.facts.some((fact) => fact.slug === 'user-wants-sharpness-first'));
+  results.push({ scenario: 'S5 export/import: deliberate portability, no auto-sharing', checks });
 }
 
 async function main(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'roundtable-memory-sim-'));
   process.env.ROUNDTABLE_DATA_PATH = join(root, 'data.json');
   process.env.ROUNDTABLE_WORKSPACE_ROOT = join(root, 'workspaces');
-  process.env.ROUNDTABLE_MEMORY_ROOT = join(root, 'global-memory');
   await resetData();
   const workspaceA = join(root, 'project-a');
   const workspaceB = join(root, 'project-b');
@@ -250,10 +245,10 @@ async function main(): Promise<void> {
 
   const scenarios: Array<[string, () => Promise<void>]> = [
     ['S1', () => scenario1(workspaceA)],
-    ['S2', () => scenario2(workspaceB)],
+    ['S2', () => scenario2(workspaceA)],
     ['S3', () => scenario3(workspaceB)],
     ['S4', () => scenario4(workspaceB)],
-    ['S5', () => scenario5()],
+    ['S5', () => scenario5(workspaceA, workspaceB)],
   ];
   try {
     for (const [name, run] of scenarios) {

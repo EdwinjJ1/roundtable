@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { loadAgentMemory, syncProjectMemoryToGlobal } from '../src/server/actions/agent-memory.js';
+import { loadAgentMemory } from '../src/server/actions/agent-memory.js';
 import { AGENT_ROSTER } from '../src/server/actions/agent-roster.js';
 import type { AgentProfile } from '../src/server/actions/agent-roster.js';
 import { applyDocPolicy, quarantineDocs } from '../src/server/actions/turns/doc-policy.js';
@@ -15,12 +15,10 @@ let workspace = '';
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), 'roundtable-docpolicy-'));
   workspace = join(tempDir, 'workspace');
-  process.env.ROUNDTABLE_MEMORY_ROOT = join(tempDir, 'global-memory');
   await mkdir(workspace, { recursive: true });
 });
 
 afterEach(async () => {
-  delete process.env.ROUNDTABLE_MEMORY_ROOT;
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -123,23 +121,10 @@ describe('quarantineDocs', () => {
     const relocated = await readFile(join(workspace, '.roundtable', 'quarantine', 'task_1', 'NOTES.md'), 'utf8');
     expect(relocated).toContain('lens scoring');
 
-    const memory = await loadAgentMemory({ workspace, agentId: 'atlas', ownerId: 'user-1' });
+    const memory = await loadAgentMemory({ workspace, agentId: 'atlas' });
     const fact = memory.facts.find((item) => item.slug === 'unreviewed-notes');
     expect(fact?.type).toBe('unreviewed');
     expect(fact?.text).toContain('lens scoring');
-  });
-
-  it('keeps unreviewed facts out of the global store on sync', async () => {
-    await writeFile(join(workspace, 'STRAY.md'), 'stray content', 'utf8');
-    const decision = applyDocPolicy({
-      task: task(),
-      agent: agent('atlas'),
-      files: [file('STRAY.md', 'stray content')],
-    });
-    await quarantineDocs({ workspace, taskId: 'task_1', agentId: 'atlas', quarantined: decision.quarantined });
-
-    const sync = await syncProjectMemoryToGlobal({ workspace, agentId: 'atlas', ownerId: 'user-1' });
-    expect(sync.synced).toEqual([]);
   });
 });
 
@@ -158,7 +143,6 @@ describe('buildDocsAuditContext', () => {
     const { buildDocsAuditContext } = await import('../src/server/actions/turns/doc-policy.js');
     const context = await buildDocsAuditContext({
       workspace,
-      ownerId: 'user-1',
       artifacts: [
         { id: 'a1', kind: 'markdown', title: 'docs/architecture.md', ownerAgentId: 'nova' },
         { id: 'a2', kind: 'preview', title: 'index.html', ownerAgentId: 'atlas' },

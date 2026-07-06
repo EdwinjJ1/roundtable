@@ -122,7 +122,6 @@ export async function quarantineDocs(input: {
 */
 export async function buildDocsAuditContext(input: {
   workspace: string;
-  ownerId: string;
   artifacts: Array<Pick<Artifact, 'id' | 'kind' | 'title' | 'ownerAgentId'>>;
 }): Promise<string> {
   const seen = new Set<string>();
@@ -131,7 +130,7 @@ export async function buildDocsAuditContext(input: {
     .filter((artifact) => (seen.has(artifact.title) ? false : (seen.add(artifact.title), true)))
     .slice(0, 20);
   const memoryHealth = await Promise.all(AGENT_ROSTER.map(async (agent) => {
-    const memory = await loadAgentMemory({ workspace: input.workspace, agentId: agent.id, ownerId: input.ownerId })
+    const memory = await loadAgentMemory({ workspace: input.workspace, agentId: agent.id })
       .catch(() => null);
     if (!memory || memory.facts.length === 0) return null;
     const unreviewed = memory.facts.filter((fact) => fact.type === 'unreviewed').length;

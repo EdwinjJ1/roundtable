@@ -7,7 +7,6 @@ import {
   formatMemoryForPrompt,
   loadAgentMemory,
   memoryMaintenanceDirective,
-  syncProjectMemoryToGlobal,
   writeProjectFact,
 } from './agent-memory.js';
 import { extractMemorySection } from './memory-extract.js';
@@ -54,8 +53,6 @@ export async function runAgentTask(input: {
   // Chat the turn belongs to: the scope for CLI session reuse, so consecutive
   // turns in one chat resume the same CLI conversation.
   chatId?: string | null | undefined;
-  // Scopes the agent's GLOBAL memory store (cross-project recall).
-  ownerId?: string | undefined;
   handoffContext?: string | undefined;
   runtimeEnv?: NodeJS.ProcessEnv | undefined;
 }): Promise<AgentRunResult> {
@@ -137,7 +134,6 @@ async function runAgentCliTask(input: {
   message: string;
   turnId?: string | undefined;
   chatId?: string | null | undefined;
-  ownerId?: string | undefined;
   handoffContext?: string | undefined;
   runtimeEnv?: NodeJS.ProcessEnv | undefined;
 }): Promise<AgentRunResult> {
@@ -147,8 +143,7 @@ async function runAgentCliTask(input: {
   // Markdown log — NEVER as .html — and the actual deliverables are collected
   // from the workspace after the run.
   const path = transcriptPathForTask(input.task);
-  const ownerId = input.ownerId ?? 'local-user';
-  const memory = await loadAgentMemory({ workspace: input.workspace, agentId: agent.id, ownerId });
+  const memory = await loadAgentMemory({ workspace: input.workspace, agentId: agent.id });
   const prompt = agentPrompt(agent, input, {
     memoryBlock: formatMemoryForPrompt(memory, `${input.task.title} ${input.task.brief} ${input.message}`),
     maintenanceBlock: memoryMaintenanceDirective(memory),
@@ -243,18 +238,6 @@ async function runAgentCliTask(input: {
           quarantined: policy.quarantined,
         })
       : { moved: [], folded: [], failed: [] };
-    // Mirror the agent's project memory into its global store so its next
-    // mission — in any project — starts with it. Best-effort: a memory sync
-    // failure must never fail a run that succeeded, but it IS surfaced as an
-    // event — a systemic problem (disk full, permissions) must stay visible.
-    let memorySyncError: string | null = null;
-    const memorySync = ok
-      ? await syncProjectMemoryToGlobal({ workspace: input.workspace, agentId: agent.id, ownerId })
-          .catch((error: unknown) => {
-            memorySyncError = error instanceof Error ? error.message : String(error);
-            return { synced: [], skipped: [] };
-          })
-      : { synced: [], skipped: [] };
     return {
       text,
       path,
@@ -275,19 +258,6 @@ async function runAgentCliTask(input: {
           ? [{
               type: 'thinking_delta',
               delta: `Document policy: failed to quarantine ${quarantine.failed.join(', ')} — check workspace filesystem permissions.`,
-            } as AgentEvent]
-          : []),
-        ...(memorySyncError
-          ? [{
-              type: 'thinking_delta',
-              delta: `Memory sync to the global store failed (${memorySyncError}); the run itself is unaffected.`,
-            } as AgentEvent]
-          : []),
-        ...(memorySync.synced.length > 0 || memorySync.skipped.length > 0
-          ? [{
-              type: 'thinking_delta',
-              delta: `Memory: ${memorySync.synced.length} fact(s) synced to ${agent.displayName}'s global store`
-                + (memorySync.skipped.length > 0 ? `; ${memorySync.skipped.length} skipped (store at capacity — compaction pending).` : '.'),
             } as AgentEvent]
           : []),
         {
@@ -405,7 +375,6 @@ async function runChatModelTask(
     workspace: string;
     task: PlanTask;
     message: string;
-    ownerId?: string | undefined;
     handoffContext?: string | undefined;
   },
   provider: { name: string; toolName: string; model: string; run: ChatModelRun; isUnavailable: (error: unknown) => boolean },
@@ -416,11 +385,7 @@ async function runChatModelTask(
   const system = chatAgentPrompt(agent, input);
   // Chat agents can't write files, so memory is read-only recall for them: it
   // still lets the agent answer with what it learned in earlier missions.
-  const memory = await loadAgentMemory({
-    workspace: input.workspace,
-    agentId: agent.id,
-    ownerId: input.ownerId ?? 'local-user',
-  });
+  const memory = await loadAgentMemory({ workspace: input.workspace, agentId: agent.id });
   const memoryBlock = formatMemoryForPrompt(memory, `${input.task.title} ${input.task.brief} ${input.message}`);
   const user = [
     `Task: ${input.task.title}`,
@@ -516,17 +481,6 @@ async function runChatModelTask(
       }).catch(() => false);
       if (wrote) captured.push(fact.slug);
     }
-    let chatSyncError: string | null = null;
-    if (captured.length > 0) {
-      await syncProjectMemoryToGlobal({
-        workspace: input.workspace,
-        agentId: agent.id,
-        ownerId: input.ownerId ?? 'local-user',
-      }).catch((error: unknown) => {
-        chatSyncError = error instanceof Error ? error.message : String(error);
-        return { synced: [], skipped: [] };
-      });
-    }
     const reasoningTokens = (run.usage?.['completion_tokens_details'] as { reasoning_tokens?: number } | undefined)?.reasoning_tokens;
     return {
       text,
@@ -542,12 +496,6 @@ async function runChatModelTask(
           ? [{
               type: 'thinking_delta',
               delta: `Memory: captured ${captured.length} fact(s) from the reply — ${captured.join(', ')}.`,
-            } as AgentEvent]
-          : []),
-        ...(chatSyncError
-          ? [{
-              type: 'thinking_delta',
-              delta: `Memory sync to the global store failed (${chatSyncError}); the reply itself is unaffected.`,
             } as AgentEvent]
           : []),
         { type: 'text_delta', delta: `${agent.displayName} produced ${path} via ${provider.model}.` },
@@ -567,7 +515,6 @@ async function runMiniMaxTask(input: {
   workspace: string;
   task: PlanTask;
   message: string;
-  ownerId?: string | undefined;
   handoffContext?: string | undefined;
 }): Promise<AgentRunResult> {
   const model = await resolvedMiniMaxModel();
@@ -587,7 +534,6 @@ async function runOpenAICompatTask(input: {
   workspace: string;
   task: PlanTask;
   message: string;
-  ownerId?: string | undefined;
   handoffContext?: string | undefined;
 }): Promise<AgentRunResult> {
   const model = await resolvedOpenAICompatModel();

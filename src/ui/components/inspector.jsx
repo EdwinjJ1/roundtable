@@ -263,21 +263,19 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
   );
 }
 
-/* ---- memory tab: each agent's persistent facts, with export + promote ---- */
+/* ---- memory tab: this project's per-agent facts, with export -------------- */
 function MemoryTab({ activeChatId, authed, agents }) {
   const overviewQ = trpc.agentMemory.overview.useQuery(
     { chatId: activeChatId || undefined },
     { enabled: !!authed, refetchInterval: 20000 },
   );
   const utils = trpc.useUtils();
-  const promote = trpc.agentMemory.promote.useMutation({
-    onSuccess: () => utils.agentMemory.overview.invalidate(),
-  });
   const [exporting, setExporting] = useState(false);
   const onExport = async () => {
+    if (!activeChatId) return;
     setExporting(true);
     try {
-      const bundle = await utils.agentMemory.export.fetch({ chatId: activeChatId || undefined });
+      const bundle = await utils.agentMemory.export.fetch({ chatId: activeChatId });
       const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -303,9 +301,10 @@ function MemoryTab({ activeChatId, authed, agents }) {
         <div style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
           Agent memory
         </div>
-        <button onClick={onExport} disabled={exporting || overviews.length === 0}
+        <button onClick={onExport} disabled={exporting || overviews.length === 0 || !activeChatId}
+          title="Download this project's agent memory as a portable bundle"
           style={{ ...iconBtn, width: 'auto', padding: '0 10px', fontSize: 11.5, fontWeight: 600, gap: 5,
-            opacity: overviews.length === 0 ? 0.5 : 1 }}>
+            opacity: overviews.length === 0 || !activeChatId ? 0.5 : 1 }}>
           <Icon name="clip" size={13} /> {exporting ? 'Exporting…' : 'Export'}
         </button>
       </div>
@@ -330,36 +329,21 @@ function MemoryTab({ activeChatId, authed, agents }) {
             </div>
           ))}
           {agent.facts.map((fact) => (
-            <div key={`${fact.scope}-${fact.slug}`} style={{ display: 'flex', alignItems: 'flex-start', gap: 8,
+            <div key={fact.slug} style={{ display: 'flex', alignItems: 'flex-start', gap: 8,
               padding: '7px 9px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border)',
               background: 'var(--surface-2)', marginBottom: 6 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--mono, monospace)' }}>{fact.slug}</span>
-                  {badge(fact.scope, fact.scope === 'global' ? '#7c5cff' : '#0e9f6e')}
                   {fact.type !== 'note' && badge(fact.type, fact.type === 'unreviewed' ? '#b45309' : 'var(--text-faint)')}
                   {fact.overLimit && badge('over budget', '#dc2626')}
                 </div>
                 <div style={{ fontSize: 11.5, color: 'var(--text-faint)', marginTop: 2, lineHeight: 1.4 }}>{fact.description}</div>
               </div>
-              {fact.scope === 'project' && activeChatId && (
-                <button
-                  onClick={() => promote.mutate({ chatId: activeChatId, agentId: agent.agentId, slug: fact.slug })}
-                  disabled={promote.isPending}
-                  title="Promote to this agent's global memory (available in every project)"
-                  style={{ ...iconBtn, width: 'auto', padding: '0 8px', fontSize: 11, fontWeight: 600 }}>
-                  Promote
-                </button>
-              )}
             </div>
           ))}
         </div>
       ))}
-      {promote.data?.status === 'store_full' && (
-        <div style={{ fontSize: 11.5, color: 'var(--warn, #b45309)' }}>
-          Global store is at capacity — the agent must compact its memory before new facts can be promoted.
-        </div>
-      )}
     </div>
   );
 }

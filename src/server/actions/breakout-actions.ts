@@ -111,6 +111,63 @@ export async function createBreakoutRoom(
   });
 }
 
+/*
+  DM rooms are single-participant breakout rooms: the same persistence,
+  context injection, and reply pipeline, with the room's one agent always
+  answering. One open room per (chat, agent) so the panel reopens onto its
+  history instead of forking a new thread every time.
+*/
+export async function getOrCreateDmRoom(
+  actor: Actor,
+  input: { chatId: string; agentId: string },
+): Promise<BreakoutRoomBundle> {
+  await requireChat(actor, input.chatId);
+  const agentId = input.agentId.trim();
+  if (!AGENT_ROSTER.some((agent) => agent.id === agentId)) throw new Error('breakout_unknown_participant');
+
+  return mutateData((data) => {
+    const existing = data.breakoutRooms.find((room) =>
+      room.ownerId === actor.id
+      && room.chatId === input.chatId
+      && room.status === 'open'
+      && room.participantAgentIds.length === 1
+      && room.participantAgentIds[0] === agentId);
+    if (existing) {
+      return {
+        ...existing,
+        messages: data.breakoutMessages
+          .filter((message) => message.ownerId === actor.id && message.roomId === existing.id)
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+      };
+    }
+    const now = nowIso();
+    const room: BreakoutRoom = {
+      id: id('br'),
+      ownerId: actor.id,
+      chatId: input.chatId,
+      createdBy: actor.id,
+      participantAgentIds: [agentId],
+      status: 'open',
+      createdAt: now,
+      updatedAt: now,
+      closedAt: null,
+    };
+    data.breakoutRooms.push(room);
+    touchChat(data.chats, input.chatId, now);
+    return { ...room, messages: [] };
+  });
+}
+
+// One-call DM send: resolve the (chat, agent) room, then run the normal
+// post-message flow so the agent's contextual reply lands in the same room.
+export async function postDmMessage(
+  actor: Actor,
+  input: { chatId: string; agentId: string; content: string },
+): Promise<BreakoutMessage> {
+  const room = await getOrCreateDmRoom(actor, { chatId: input.chatId, agentId: input.agentId });
+  return postBreakoutMessage(actor, { roomId: room.id, content: input.content });
+}
+
 export async function postBreakoutMessage(
   actor: Actor,
   input: {
@@ -225,6 +282,7 @@ export async function generateBreakoutAgentReply(input: {
   context?: BreakoutContextPackage | undefined;
 }): Promise<string> {
   const speaker = agentLabel(input.replyAuthorId);
+  const isDm = input.participantAgentIds.length === 1;
   const participants = input.participantAgentIds.map(agentLabel).join(', ');
   const latestUserMessage = [...input.transcript].reverse().find((message) => message.authorType === 'user')?.content || '';
   const relation = classifyBreakoutRequest(latestUserMessage, input.context);
@@ -242,8 +300,12 @@ export async function generateBreakoutAgentReply(input: {
     {
       role: 'system' as const,
       content: [
-        'You are replying inside a Roundtable breakout room.',
-        `You are ${speaker}. Other participants: ${participants}.`,
+        isDm
+          ? 'You are replying inside a private 1:1 room between you and the user, next to the main Roundtable chat.'
+          : 'You are replying inside a Roundtable breakout room.',
+        isDm
+          ? `You are ${speaker}.`
+          : `You are ${speaker}. Other participants: ${participants}.`,
         input.responderReason ? `You were selected to answer because: ${input.responderReason}.` : null,
         'This room is for brainstorming, clarification, tradeoff thinking, and forming an action-ready plan.',
         'Reply as the agent, not as the system. Do not execute work, do not claim files changed, and do not send anything to the main chat.',
