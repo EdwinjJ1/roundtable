@@ -295,7 +295,8 @@ function MemoryTab({ activeChatId, authed, agents }) {
     <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999,
       background: alpha(color, 12), color }}>{label}</span>
   );
-  const profileFor = (agentId) => (agents || []).find((item) => item.id === agentId);
+  // `agents` is a map keyed by agent id (see FileRow: agents[art.ownerAgentId]).
+  const profileFor = (agentId) => (agents || {})[agentId];
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 24px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '0 0 12px' }}>
