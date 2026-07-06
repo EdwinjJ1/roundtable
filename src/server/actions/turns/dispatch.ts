@@ -10,6 +10,7 @@ import type {
 import { E2BUnavailableError } from '../adapters/e2b-adapter.js';
 import { MiniMaxUnavailableError } from '../adapters/minimax-adapter.js';
 import { OpenAICompatUnavailableError } from '../adapters/openai-compat-adapter.js';
+import { agentForTask } from '../agent-roster.js';
 import { normalizeAdapter, runAgentTask } from '../agent-runner.js';
 import {
   buildHandoffCardV2,
@@ -55,6 +56,8 @@ export type DispatchInput = {
   agentAdapter?: string | undefined;
   actor?: Actor | null | undefined;
 };
+
+type TaskAdapter = ReturnType<typeof normalizeAdapter>;
 
 export async function approveTurn(input: ApprovalInput): Promise<DispatchResponse> {
   const turn = await getTurn(input.turnId, input);
@@ -223,20 +226,20 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
       formatHandoffContext(handoffCard, depOutputs),
     ].filter(Boolean).join('\n\n---\n\n');
 
+    const taskAdapter = adapterForTask(effectiveTask, adapter);
     let result;
     let fallbackNote: AgentEvent | null = null;
     try {
-      result = await runAgentTask({ adapter, workspace, task: effectiveTask, message: turn.message, turnId: turn.id, chatId: turn.localChatId, handoffContext, runtimeEnv });
+      result = await runAgentTask({ adapter: taskAdapter, workspace, task: effectiveTask, message: turn.message, turnId: turn.id, chatId: turn.localChatId, handoffContext, runtimeEnv });
     } catch (error) {
-      // Opt-in adapter unavailable (E2B / MiniMax / OpenAI-compatible): fall back
-      // to local-dispatch in this layer (not silently inside the adapter). The
-      // fallback is surfaced as an event on the task so a misconfig is visible
-      // in the UI, not hidden.
-      if (
+      // E2B / MiniMax may still fall back to local-dispatch for offline runs.
+      // The hybrid production routes are stricter: planner/PM OpenAI-compatible
+      // and execution-agent CLI failures surface as real dispatch failures.
+      if ((
         error instanceof E2BUnavailableError
         || error instanceof MiniMaxUnavailableError
         || error instanceof OpenAICompatUnavailableError
-      ) {
+      ) && allowLocalFallback(taskAdapter)) {
         fallbackNote = {
           type: 'thinking_delta',
           delta: `${error.name} (${error.message}); fell back to local-dispatch.`,
@@ -531,6 +534,18 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     });
   }
   return dispatchResponse(finalTurn);
+}
+
+export function adapterForTask(task: PlanTask, workflowAdapter: TaskAdapter): TaskAdapter {
+  if (workflowAdapter === 'local-dispatch') return 'local-dispatch';
+  const agent = agentForTask(task);
+  if (agent.role === 'planner' || agent.role === 'pm') return 'openai-compat';
+  if (workflowAdapter === 'openai-compat') return 'agent-cli';
+  return workflowAdapter;
+}
+
+function allowLocalFallback(adapter: TaskAdapter): boolean {
+  return adapter !== 'openai-compat' && adapter !== 'agent-cli';
 }
 
 export async function interruptTurn(turnId: string, access?: { actor?: Actor | null | undefined } | undefined): Promise<DispatchResponse> {

@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createChat, createMessage, deleteChat } from '../src/server/actions/chat-actions.js';
 import { normalizeAdapter } from '../src/server/actions/agent-runner.js';
 import { listMissions, rejectHandoff } from '../src/server/actions/mission-actions.js';
@@ -9,7 +9,7 @@ import { listHandoffsByChat } from '../src/server/actions/read-actions.js';
 import { saveAgentRuntimeConfig } from '../src/server/actions/runtime-actions.js';
 import { answerClarification, approveTurn, createTurn, listTurns, reviewSeverities } from '../src/server/actions/turn-actions.js';
 import { createWorkbench } from '../src/server/actions/workbench-actions.js';
-import { resetData } from '../src/server/store.js';
+import { readData, resetData } from '../src/server/store.js';
 import type { Actor } from '../src/server/types.js';
 
 let tempDir = '';
@@ -38,6 +38,10 @@ afterEach(async () => {
   delete process.env.ROUNDTABLE_ENABLE_EXTERNAL_AGENT;
   delete process.env.ROUNDTABLE_ALLOW_CLAUDE_CLI;
   delete process.env.ROUNDTABLE_CLARIFY_ENABLED;
+  delete process.env.ROUNDTABLE_OPENAI_API_KEY;
+  delete process.env.ROUNDTABLE_OPENAI_BASE_URL;
+  delete process.env.ROUNDTABLE_OPENAI_MODEL;
+  vi.restoreAllMocks();
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -247,6 +251,7 @@ describe('Roundtable clean workflow', () => {
   });
 
   it('can dispatch through an explicitly enabled external CLI command adapter', async () => {
+    configureOpenAICompatOutput('external planner output');
     await configureRuntimeOutput('orchestrator', 'external planner output');
     await configureRuntimeOutput('nova', 'external architecture output');
     await configureRuntimeOutput('atlas', 'external implementer output');
@@ -280,7 +285,55 @@ describe('Roundtable clean workflow', () => {
     // Spawns one node fixture per task (5 with the architect bracket); under
     // full-suite CPU contention the default 5s budget flakes.
   }, 30_000);
+
+  it('routes planner work through OpenAI-compatible API while execution agents use CLI runtimes', async () => {
+    configureOpenAICompatOutput('API planning output');
+    process.env.ROUNDTABLE_AGENT_ADAPTER = 'openai-compat';
+
+    await configureRuntimeOutput('nova', 'CLI architecture output');
+    await configureRuntimeOutput('atlas', 'CLI implementer output');
+    await configureRuntimeOutput('vera', 'CLI reviewer output: looks solid');
+
+    const workbench = await createWorkbench(actor, {
+      name: 'Hybrid adapter test',
+      workspacePath: 'workspaces/hybrid',
+    });
+    const chat = await createChat(actor, {
+      workbenchId: workbench.id,
+      title: 'Hybrid route',
+    });
+    const turn = await createTurn({
+      actor,
+      chatId: chat.id,
+      message: 'Build a lightweight dashboard and review it.',
+    });
+
+    const approval = await approveTurn({
+      actor,
+      turnId: turn.id,
+      decision: 'approve',
+      autoDispatch: true,
+    });
+    const data = await readData();
+    const runtimeConversations = data.agentRuntimeConversations;
+    const fetchMock = vi.mocked(fetch);
+
+    expect(approval.dispatchStatus).toBe('completed');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(runtimeConversations.map((conversation) => conversation.agentId).sort()).toEqual(['atlas', 'nova', 'nova', 'vera']);
+    expect(runtimeConversations.every((conversation) => conversation.status === 'completed')).toBe(true);
+  }, 30_000);
 });
+
+function configureOpenAICompatOutput(text: string): void {
+  process.env.ROUNDTABLE_OPENAI_API_KEY = 'test-key';
+  process.env.ROUNDTABLE_OPENAI_BASE_URL = 'https://example.test/v1';
+  process.env.ROUNDTABLE_OPENAI_MODEL = 'deepseek-test';
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    choices: [{ message: { content: text }, finish_reason: 'stop' }],
+    usage: {},
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+}
 
 async function configureRuntimeOutput(agentId: string, text: string): Promise<void> {
   await saveAgentRuntimeConfig({
