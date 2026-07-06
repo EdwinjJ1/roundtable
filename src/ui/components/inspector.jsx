@@ -253,7 +253,7 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
       ) : tab === 'memory' ? (
         <MemoryPanel memory={memory} />
       ) : tab === 'agentMemory' ? (
-        <MemoryTab activeChatId={activeChatId} authed={authed} />
+        <MemoryTab activeChatId={activeChatId} authed={authed} agents={agents} />
       ) : live || hasLocalTurns ? (
         <LiveNotes agents={agents} artifacts={created} handoffs={liveHandoffs} />
       ) : (
@@ -264,7 +264,7 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
 }
 
 /* ---- memory tab: each agent's persistent facts, with export + promote ---- */
-function MemoryTab({ activeChatId, authed }) {
+function MemoryTab({ activeChatId, authed, agents }) {
   const overviewQ = trpc.agentMemory.overview.useQuery(
     { chatId: activeChatId || undefined },
     { enabled: !!authed, refetchInterval: 20000 },
@@ -290,10 +290,12 @@ function MemoryTab({ activeChatId, authed }) {
     }
   };
   const overviews = overviewQ.data ?? [];
+  // alpha() takes a 0-100 percentage, matching the rest of primitives.jsx.
   const badge = (label, color) => (
     <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999,
-      background: alpha(color, 0.12), color }}>{label}</span>
+      background: alpha(color, 12), color }}>{label}</span>
   );
+  const profileFor = (agentId) => (agents || []).find((item) => item.id === agentId);
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 24px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '0 0 12px' }}>
@@ -315,8 +317,11 @@ function MemoryTab({ activeChatId, authed }) {
       ) : overviews.map((agent) => (
         <div key={agent.agentId} style={{ marginBottom: 18 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, margin: '0 0 7px' }}>
+            {profileFor(agent.agentId) && <Avatar agent={profileFor(agent.agentId)} size={22} />}
             <span style={{ fontSize: 13, fontWeight: 600 }}>{agent.displayName}</span>
-            <RoleTag role={agent.role} />
+            {profileFor(agent.agentId)
+              ? <RoleTag agent={profileFor(agent.agentId)} />
+              : <span style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>@{agent.role}</span>}
           </div>
           {agent.compactionNeeds.map((need, index) => (
             <div key={index} style={{ fontSize: 11.5, color: 'var(--warn, #b45309)', margin: '0 0 6px', lineHeight: 1.4 }}>
