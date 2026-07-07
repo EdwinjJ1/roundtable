@@ -653,6 +653,9 @@ function App() {
   const handleSignUp = useCallback(() => {
     window.location.assign(`/signup?callbackUrl=${encodeURIComponent(window.location.href)}`);
   }, []);
+  const handleOpenProfile = useCallback(() => {
+    window.location.assign('/profile');
+  }, []);
   const handleSignOut = useCallback(() => {
     void signOut({ callbackUrl: window.location.href });
   }, []);
@@ -1288,6 +1291,7 @@ function App() {
           memberIds={memberIds} onRemoveMember={(id) => setMemberIds((m) => m.filter((x) => x !== id))}
           onAddMember={() => setModal('agent')} onNewTask={() => setModal('task')} onNewWorkbench={() => setModal('table')}
           onPickWorkbench={pickWorkbench} onCollapse={() => setRailOpen(false)}
+          authStatus={authStatus} user={session?.user} onOpenProfile={handleOpenProfile} onSignIn={handleSignIn}
           onDelete={authed
             ? (id) => {
                 if (!window.confirm('Delete this session? Its generated workspace code is deleted with it.')) return;
@@ -1304,6 +1308,7 @@ function App() {
                 memberIds={memberIds} onRemoveMember={(id) => setMemberIds((m) => m.filter((x) => x !== id))}
                 onAddMember={() => setModal('agent')} onNewTask={() => setModal('task')} onNewWorkbench={() => setModal('table')}
                 onPickWorkbench={pickWorkbench} onCollapse={() => setRailOpen(false)}
+                authStatus={authStatus} user={session?.user} onOpenProfile={handleOpenProfile} onSignIn={handleSignIn}
                 onDelete={authed
             ? (id) => {
                 if (!window.confirm('Delete this session? Its generated workspace code is deleted with it.')) return;
