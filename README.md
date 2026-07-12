@@ -44,6 +44,10 @@ the product:
   fixer roles that stay with your workbench across missions.
 - **Visual roundtable** — live runs, handoffs, artifacts, review state, and
   chat in one view, plus breakout side rooms.
+- **Real planning meeting** — a planner-led product → architecture → execution
+  → review relay is persisted before any coding runtime starts. Each seat has a
+  bounded, non-overlapping mandate; deterministic code remains authoritative
+  for ownership and dependencies.
 - **Dependency-aware scheduler** — independent tasks run in parallel waves;
   blocked tasks wait for exactly what they need.
 - **Bounded review → fix loop** — failed reviews or blocking safety findings
@@ -124,11 +128,19 @@ flowchart LR
 ```
 
 1. You describe a goal in plain language.
-2. The planner turns it into a dependency-aware task plan.
-3. The scheduler runs every unlocked task in parallel waves.
+2. A bounded planning meeting reads compact repo context, relays product,
+   architecture, execution, and review perspectives, then locks the plan.
+3. After approval, the scheduler runs every unlocked task in parallel waves.
 4. Agents produce files, diffs, previews, review comments, and handoffs.
 5. Safety or review failures create bounded fixer rounds.
 6. The run finishes with artifacts and decisions preserved in the workbench.
+
+When a chat-model provider is configured, planning meetings use its ordinary
+API before Claude Code/Codex/OpenCode dispatch. Set
+`ROUNDTABLE_PLANNING_MEETING_MODEL` to a cheaper provider-compatible model, or
+to `local` for the deterministic zero-key meeting. Calls are bounded to two
+parallel perspectives, one implementation response, one review, and one
+planner synthesis.
 
 ## 🔌 Agent adapters
 

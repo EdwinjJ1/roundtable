@@ -138,7 +138,9 @@ describe('custom template storage — override by id', () => {
     await saveWorkflowTemplate(template);
 
     const turn = await createTurn({ actor, message: 'Build a landing page and review it.' });
-    expect(turn.plan.tasks.map((task) => task.owner)).toEqual(['orchestrator', 'atlas', 'vera']);
+    // Planner was satisfied by the API meeting; the edited template still
+    // controls every CLI task that remains.
+    expect(turn.plan.tasks.map((task) => task.owner)).toEqual(['atlas', 'vera']);
   });
 });
 

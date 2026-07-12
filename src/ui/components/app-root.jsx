@@ -15,7 +15,7 @@ import { Modal, NewTaskModal, NewWorkbenchModal, AddAgentModal } from './modals'
 import { TopBar, recommendWorkflow, Dock } from './stage-scene';
 import { LiveTranscriptFeed } from './live-turn';
 import { Drawer, InspectorPanel } from './inspector';
-import { latestLiveTurn, buildLocalScene } from '../lib/live-scene';
+import { latestLiveTurn, buildLocalScene, planningMessageDuration } from '../lib/live-scene';
 import { withBundledPreview } from '../lib/preview-html';
 import { signOut, useSession } from 'next-auth/react';
 import { trpc } from '@/ui/lib/trpc';
@@ -145,6 +145,7 @@ function storedTurnToLiveTurn(turn) {
             artifacts: turn.artifacts,
             intake: turn.intake,
             plan: turn.plan,
+            planningMeeting: turn.planningMeeting || null,
             workflow: turn.workflow,
             workflowRun: turn.workflowRun,
             mission: turn.mission,
@@ -630,6 +631,10 @@ function App() {
   }, []);
   const [localTurns, setLocalTurns] = useState([]);
   const [localStatus, setLocalStatus] = useState('idle');
+  // A newly returned planning meeting is replayed once on the roundtable. The
+  // chat plan stays hidden until the last speaker finishes; historical turns
+  // skip replay and open directly on their already-decided plan.
+  const [planningPlayback, setPlanningPlayback] = useState(null);
   // Persisted so a page refresh restores this chat's live turns from history
   // instead of starting an empty session.
   const [localChatId] = useState(() => {
@@ -740,6 +745,13 @@ function App() {
     ? (localTurns.find((turn) => turn.id === selectedLocalTurnId) || localTurns[0])
     : null;
   const activeLocalTurns = activeLocalTurn ? [activeLocalTurn] : [];
+  const activePlanningPlayback = planningPlayback?.turnId === activeLocalTurn?.id
+    ? planningPlayback
+    : { meetingMessageIndex: 0, meetingComplete: true };
+  const displayedActiveLocalTurns = activeLocalTurns.map((turn) => ({
+    ...turn,
+    meetingPlaybackComplete: activePlanningPlayback.meetingComplete,
+  }));
   const activeLocalTaskId = activeLocalTurn?.id ?? localTasks[0]?.id ?? null;
   const tasks =
     authed && chatsQ.data
@@ -856,8 +868,28 @@ function App() {
   const st = useMemo(() => {
     const s = sceneAt(localLive ? 0 : scene.clock);
     if (decided) s.decision = null;
-    return localLive ? buildLocalScene(s, activeLocalTurns.length ? activeLocalTurns : localTurns, agents) : s;
-  }, [scene.clock, decided, localLive, activeLocalTurns, localTurns, agents]);
+    return localLive
+      ? buildLocalScene(s, activeLocalTurns.length ? activeLocalTurns : localTurns, agents, activePlanningPlayback)
+      : s;
+  }, [scene.clock, decided, localLive, activeLocalTurns, localTurns, agents, activePlanningPlayback]);
+  useEffect(() => {
+    if (!planningPlayback || planningPlayback.meetingComplete) return;
+    const turn = localTurns.find((item) => item.id === planningPlayback.turnId);
+    const messages = turn?.result?.planningMeeting?.messages || [];
+    if (messages.length === 0) return;
+    const current = messages[planningPlayback.meetingMessageIndex] || messages[0];
+    const duration = planningMessageDuration(current?.content);
+    const timer = window.setTimeout(() => {
+      setPlanningPlayback((playback) => {
+        if (!playback || playback.turnId !== turn.id || playback.meetingComplete) return playback;
+        if (playback.meetingMessageIndex >= messages.length - 1) {
+          return { ...playback, meetingComplete: true };
+        }
+        return { ...playback, meetingMessageIndex: playback.meetingMessageIndex + 1 };
+      });
+    }, duration);
+    return () => window.clearTimeout(timer);
+  }, [planningPlayback, localTurns]);
   useEffect(() => { if (scene.clock < 200) setDecided(false); }, [scene.clock]);
   // The finished, renderable site for the active run (if any): a preview artifact
   // with HTML content. Drives the center-stage "Preview" toggle.
@@ -1041,6 +1073,9 @@ function App() {
       setLocalTurns((turns) => turns.map((turn) => (
         turn.id === id ? { ...turn, status: 'done', result: data } : turn
       )));
+      if (data.planningMeeting?.messages?.length) {
+        setPlanningPlayback({ turnId: id, meetingMessageIndex: 0, meetingComplete: false });
+      }
       setLocalStatus('idle');
     } catch (error) {
       const errorText = error instanceof Error ? error.message : 'orchestrator_turn_failed';
@@ -1072,6 +1107,9 @@ function App() {
           ? { ...turn, clarifying: false, status: 'done', result: data }
           : turn
       )));
+      if (data.planningMeeting?.messages?.length) {
+        setPlanningPlayback({ turnId, meetingMessageIndex: 0, meetingComplete: false });
+      }
     } catch (error) {
       const errorText = error instanceof Error ? error.message : 'clarify_failed';
       setLocalTurns((turns) => turns.map((turn) => (
@@ -1394,7 +1432,7 @@ function App() {
                 {notesOpen && <InspectorPanel tab={inspectorTab} setTab={setInspectorTab} clock={scene.clock} width={compact ? 'min(100vw, 420px)' : inspectorW}
                   agents={agents} scene={scene} authed={authed} live={authed && !!activeChatId} liveArtifacts={liveArtifacts} liveMessages={liveMessages}
                   liveHandoffs={liveHandoffs} activeChatId={activeChatId}
-                  localTurns={activeLocalTurns.length ? activeLocalTurns : localTurns} allLocalTurns={localTurns} localStatus={localStatus} onApproveLocalTurn={approveLocalTurn}
+                  localTurns={displayedActiveLocalTurns.length ? displayedActiveLocalTurns : localTurns} allLocalTurns={localTurns} localStatus={localStatus} onApproveLocalTurn={approveLocalTurn}
                   localTurnActions={{ interrupt: interruptLocalTurn, redispatch: redispatchLocalTurn, discard: discardLocalTurn, clarify: answerLocalClarification, approve: approveLocalTurn, delivery: decideLocalDelivery }}
                   onOpenArtifact={setDrawerArt} onAction={onAction} onClose={() => setNotesOpen(false)}
                   onRewrite={sendComposerMessage} memory={memoryPanel} />}

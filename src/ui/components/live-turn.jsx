@@ -8,6 +8,7 @@
    ============================================================================ */
 
 import React from 'react';
+import { planSummaryForDisplay, planTaskObjective } from '../lib/plan-presentation';
 import { Avatar, Icon, Spinner, Md, tint, alpha } from './primitives';
 import { agentForArtifact, agentForSeat, todoStatusFor } from '../lib/agent-utils';
 import { bundlePreviewArtifacts, withBundledPreview } from '../lib/preview-html';
@@ -188,16 +189,20 @@ function LocalLiveTurn({ turn, agents, turnActions, showPreview }) {
   const rawArtifacts = turn.result?.artifacts || [];
   const artifacts = useMemo(() => bundlePreviewArtifacts(rawArtifacts), [rawArtifacts]);
   const previewArtifact = previewArtifactFor(artifacts, agents);
+  const meetingPlaying = Boolean(turn.result?.planningMeeting)
+    && turn.meetingPlaybackComplete === false;
+  const planningOnly = turn.status === 'pending' || meetingPlaying;
   // The plan has been drafted but no agent has run yet — show the reviewable plan
   // with a Start button instead of the (empty) run details.
   const awaitingApproval = !!turn.result
     && !turn.result.needsClarification
+    && !meetingPlaying
     && turn.result.approvalStatus !== 'approved'
     && turn.result.dispatchStatus === 'not_started';
   return (
     <>
       <UserMsg text={turn.message} />
-      <div className="rt-rise" style={{ display: 'flex', gap: 11, alignItems: 'flex-start' }}>
+      {!planningOnly && <div className="rt-rise" style={{ display: 'flex', gap: 11, alignItems: 'flex-start' }}>
         <Avatar agent={agents.orchestrator} size={28} ring={false} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
@@ -206,11 +211,6 @@ function LocalLiveTurn({ turn, agents, turnActions, showPreview }) {
           </div>
           {turn.result?.mission && (
             <MissionHeader mission={turn.result.mission} workflow={turn.result.workflow} />
-          )}
-          {turn.status === 'pending' && (
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: 'var(--text-muted)', fontSize: 13.5 }}>
-              <Spinner size={13} color="var(--text-muted)" /> running agents…
-            </div>
           )}
           {turn.status === 'error' && (
             <div style={{ padding: '10px 12px', borderRadius: 'var(--r-sm)', background: alpha('var(--bad)', 12),
@@ -293,7 +293,7 @@ function LocalLiveTurn({ turn, agents, turnActions, showPreview }) {
             </div>
           )}
         </div>
-      </div>
+      </div>}
     </>
   );
 }
@@ -909,13 +909,26 @@ const TODO_STATUS_STYLE = {
   failed: { color: 'var(--bad)', label: 'failed', icon: 'x' },
 };
 
+function conciseTaskTitle(task, owner) {
+  const stage = task?.stageKind || task?.stageId;
+  if (task?.role === 'pm') return 'Product direction';
+  if (task?.role === 'architect') return stage === 'review' ? 'Architecture check' : 'Architecture direction';
+  if (task?.role === 'implementer') return `Build · ${owner?.displayName || 'Implementer'}`;
+  if (task?.role === 'reviewer') return 'Review the build';
+  if (task?.role === 'fixer') return 'Apply review fixes';
+  return String(task?.title || 'Assigned task').slice(0, 64);
+}
 
-function TodoRow({ task, owner, record, status, last }) {
+
+function TodoRow({ task, owner, record, status, last, dependencyLabels, cliNumber }) {
   const [open, setOpen] = useState(false);
   const sty = TODO_STATUS_STYLE[status];
   const events = (record?.events || []).filter((e) => e.type === 'thinking_delta' || e.type === 'tool_use');
   const deps = Array.isArray(task?.deps) ? task.deps : [];
+  const acceptanceCriteria = Array.isArray(task?.acceptanceCriteria) ? task.acceptanceCriteria : [];
   const assignee = task?.assignee || '@planner';
+  const displayTitle = conciseTaskTitle(task, owner);
+  const objective = planTaskObjective(task);
   return (
     <div style={{ borderBottom: last ? 'none' : '1px solid var(--border)' }}>
       <button onClick={() => setOpen((v) => !v)} title="Expand task activity"
@@ -929,15 +942,19 @@ function TodoRow({ task, owner, record, status, last }) {
         </span>
         <Avatar agent={owner} size={24} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className="mono" style={{ fontSize: 11, color: 'var(--text-faint)' }}>{task.id}</span>
-            <span style={{ fontSize: 13.5, fontWeight: 600,
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+            <span className="mono" style={{ fontSize: 9.5, fontWeight: 750, color: 'var(--accent)',
+              padding: '2px 5px', borderRadius: 5, background: alpha('var(--accent)', 10) }}>CLI {cliNumber}</span>
+            <span style={{ fontSize: 13.5, fontWeight: 650,
               color: status === 'completed' ? 'var(--text-muted)' : 'var(--text)',
               textDecorationLine: status === 'completed' ? 'line-through' : 'none',
-              textDecorationColor: alpha('var(--ok)', 50) }}>{task.title}</span>
+              textDecorationColor: alpha('var(--ok)', 50) }}>{displayTitle}</span>
+          </div>
+          <div style={{ fontSize: 12.5, color: 'var(--text-muted)', lineHeight: 1.52, marginTop: 5 }}>
+            {objective}
           </div>
           <div className="mono" style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 3 }}>
-            {assignee}{task?.parallel ? ' · parallel' : ''}{deps.length ? ` · waits on ${deps.join(', ')}` : ''}
+            {assignee}{task?.parallel ? ' · parallel' : ''}{deps.length ? ` · starts after ${deps.map((id) => dependencyLabels?.get(id) || id).join(' + ')}` : ' · ready after approval'}
           </div>
         </div>
         <span style={{ fontSize: 10.5, fontWeight: 700, color: sty.color, padding: '2px 8px', borderRadius: 999,
@@ -947,8 +964,23 @@ function TodoRow({ task, owner, record, status, last }) {
       {open && (
         <div style={{ margin: '0 0 9px 28px', padding: '8px 11px', borderRadius: 'var(--r-sm)',
           background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+          <div className="mono" style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 7 }}>
+            {task.id}
+          </div>
+          {acceptanceCriteria.length > 0 && (
+            <div style={{ marginBottom: events.length > 0 ? 8 : 0 }}>
+              <div className="mono" style={{ fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase',
+                letterSpacing: '.06em', marginBottom: 4 }}>Definition of done</div>
+              {acceptanceCriteria.map((criterion, index) => (
+                <div key={`${task.id}-criterion-${index}`} style={{ display: 'grid', gridTemplateColumns: '11px 1fr',
+                  gap: 5, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                  <span style={{ color: 'var(--ok)' }}>✓</span><span>{criterion}</span>
+                </div>
+              ))}
+            </div>
+          )}
           {events.length === 0
-            ? <div style={{ fontSize: 12, color: 'var(--text-faint)', fontStyle: 'italic' }}>
+            ? acceptanceCriteria.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-faint)', fontStyle: 'italic' }}>
                 {status === 'pending' ? 'Not started yet.' : 'No activity captured.'}</div>
             : events.slice(0, 6).map((e, i) => (
                 <div key={i} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 12,
@@ -967,7 +999,6 @@ function TodoRow({ task, owner, record, status, last }) {
 }
 
 function LocalPlanCard({ plan, intake, agents, approvalStatus, approving, approvalError, onApprove, dispatch, dispatchStatus }) {
-  const [showPlan, setShowPlan] = useState(false);
   const tasks = Array.isArray(plan?.tasks) ? plan.tasks : [];
   const safeIntake = intake || { intentType: 'build', risk: 'medium', clarity: 'medium' };
   const ownerFor = (task) => {
@@ -976,6 +1007,7 @@ function LocalPlanCard({ plan, intake, agents, approvalStatus, approving, approv
     if (agents[target]) return agents[target];
     return Object.values(agents).find((a) => a.role === target && !a.pm) || agents.orchestrator;
   };
+  const dependencyLabels = new Map(tasks.map((task) => [task.id, conciseTaskTitle(task, ownerFor(task))]));
   const approved = approvalStatus === 'approved';
   const recordFor = (taskId) => (dispatch || []).find((r) => r.taskId === taskId);
   const doneCount = tasks.filter((t) =>
@@ -1017,6 +1049,10 @@ function LocalPlanCard({ plan, intake, agents, approvalStatus, approving, approv
           {approvalError}
         </div>
       )}
+      <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)',
+        background: 'var(--surface-2)', color: 'var(--text-muted)', fontSize: 12.5, lineHeight: 1.5 }}>
+        {planSummaryForDisplay(plan)}
+      </div>
       <div style={{ padding: '4px 14px 6px' }}>
         {tasks.map((task, i) => {
           const record = recordFor(task.id);
@@ -1028,23 +1064,12 @@ function LocalPlanCard({ plan, intake, agents, approvalStatus, approving, approv
               record={record}
               status={todoStatusFor(task, record, approved, dispatchStatus)}
               last={i === tasks.length - 1}
+              dependencyLabels={dependencyLabels}
+              cliNumber={i + 1}
             />
           );
         })}
       </div>
-      <button onClick={() => setShowPlan((v) => !v)} style={{ width: '100%', display: 'flex', alignItems: 'center',
-        gap: 6, padding: '8px 14px', background: 'var(--surface-2)', border: 'none', borderTop: '1px solid var(--border)',
-        font: 'inherit', fontSize: 11.5, fontWeight: 600, color: 'var(--text-muted)', cursor: 'pointer' }}>
-        <Icon name={showPlan ? 'chevdown' : 'chevron'} size={11} />
-        {showPlan ? 'Hide plan' : 'Show plan'}
-      </button>
-      {showPlan && (
-        <pre className="mono" style={{ margin: 0, padding: '10px 14px', fontSize: 11, lineHeight: 1.55,
-          color: 'var(--text-muted)', background: 'var(--bg)', borderTop: '1px solid var(--border)',
-          overflowX: 'auto', maxHeight: 260, overflowY: 'auto' }}>
-          {JSON.stringify(plan, null, 2)}
-        </pre>
-      )}
     </div>
   );
 }

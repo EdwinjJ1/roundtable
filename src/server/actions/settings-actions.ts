@@ -184,6 +184,10 @@ export async function resolveDefaultAgentAdapter(): Promise<string | null> {
 export async function resolveDefaultAgentAdapterState(
   inputData?: RoundtableData,
 ): Promise<AgentAdapterResolution> {
+  if (publicAiExecutionDisabled()) {
+    return { value: 'local-dispatch', source: 'built-in', modelProvider: null };
+  }
+
   const data = inputData ?? await readData();
   const fromSettings = normalizeAgentAdapter(data.settings.defaultAgentAdapter);
   if (fromSettings) return { value: fromSettings, source: 'settings', modelProvider: null };
@@ -212,11 +216,16 @@ export async function isModelProviderConfigured(provider: ModelProviderKind): Pr
 }
 
 export async function defaultConfiguredModelProvider(): Promise<ModelProviderKind | null> {
+  if (publicAiExecutionDisabled()) return null;
   return firstConfiguredModelProvider(await readData());
 }
 
 export async function resolveModelProvider(provider: ModelProviderKind): Promise<ResolvedModelProvider> {
   return resolveModelProviderFromData(provider, await readData());
+}
+
+export function publicAiExecutionDisabled(): boolean {
+  return process.env.VERCEL === '1' && process.env.ROUNDTABLE_ENABLE_PUBLIC_AI !== '1';
 }
 
 export class SettingsActionError extends Error {
@@ -232,6 +241,19 @@ function resolveModelProviderFromData(
   const definition = providerDefinition(provider);
   if (!definition) throw new SettingsActionError('unsupported_model_provider', 400);
   const stored = data.settings.modelProviders.find((item) => item.provider === provider) ?? null;
+  if (publicAiExecutionDisabled()) {
+    return {
+      provider,
+      enabled: false,
+      configured: false,
+      label: stored?.label || definition.label,
+      apiKey: null,
+      baseUrl: stored?.baseUrl || definition.defaultBaseUrl,
+      model: stored?.model || definition.defaultModel,
+      source: 'none',
+    };
+  }
+
   const envApiKey = clean(process.env[definition.apiKeyEnv]) ?? null;
   const envBaseUrl = clean(process.env[definition.baseUrlEnv]) ?? null;
   const envModel = clean(process.env[definition.modelEnv]) ?? null;

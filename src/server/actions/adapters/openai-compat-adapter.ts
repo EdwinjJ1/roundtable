@@ -23,6 +23,7 @@ export type OpenAICompatMessage = { role: 'system' | 'user' | 'assistant'; conte
 
 export type OpenAICompatRunInput = {
   messages: OpenAICompatMessage[];
+  model?: string | undefined;
   maxTokens?: number | undefined;
   temperature?: number | undefined;
   timeoutMs?: number | undefined;
@@ -101,7 +102,7 @@ export async function runOnOpenAICompat(input: OpenAICompatRunInput): Promise<Op
         Authorization: `Bearer ${config.apiKey}`,
       },
       body: JSON.stringify({
-        model: config.model,
+        model: input.model?.trim() || config.model,
         messages: input.messages,
         // Omit max_tokens unless explicitly configured: the provider's own
         // ceiling is usually higher than any hardcoded default, and truncation

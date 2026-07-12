@@ -333,6 +333,14 @@ function Dock({ st, agents, scene, onAction, onOpenChat, onOpenWorkflow, onSend,
       const verb = st.speech.mode === 'working' ? 'is working' : st.speech.mode === 'thinking' ? 'is thinking' : 'is speaking';
       body = <div style={{ flex: 1, minWidth: 0, fontSize: 13.5 }}><b style={{ color: a.color }}>{a.displayName}</b> {verb}…</div>;
     }
+  } else if (st.run?.phase === 'awaiting_approval') {
+    dotColor = 'var(--ok)';
+    body = (
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1, fontSize: 13.5 }}>
+        <span><b>Plan ready</b> · assignments and prerequisites are now on the table</span>
+        <span style={{ fontSize: 12.5, color: 'var(--text-faint)' }}>Review the plan in Chat, then confirm to start the CLI agents.</span>
+      </div>
+    );
   } else {
     body = (
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1, fontSize: 13.5 }}>

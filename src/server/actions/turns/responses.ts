@@ -22,6 +22,7 @@ export function turnResponse(turn: LocalTurn) {
     artifacts: turn.artifacts,
     intake: turn.intake,
     plan: turn.plan,
+    planningMeeting: turn.planningMeeting ?? null,
     workflow: turn.workflow,
     workflowRun: turn.workflowRun,
     mission: turn.mission,
@@ -45,6 +46,7 @@ export function dispatchResponse(turn: LocalTurn) {
     workspacePath: turn.dispatchWorkspacePath,
     records: turn.dispatch,
     artifacts: turn.artifacts,
+    planningMeeting: turn.planningMeeting ?? null,
     workflowRun: turn.workflowRun,
     mission: turn.mission,
   };

@@ -38,6 +38,11 @@ afterEach(async () => {
   delete process.env.ROUNDTABLE_MAX_FIX_ROUNDS;
   delete process.env.ROUNDTABLE_SAFETY_ENABLED;
   delete process.env.ROUNDTABLE_CLARIFY_ENABLED;
+  delete process.env.ROUNDTABLE_OPENAI_API_KEY;
+  delete process.env.ROUNDTABLE_OPENAI_BASE_URL;
+  delete process.env.ROUNDTABLE_OPENAI_MODEL;
+  delete process.env.ROUNDTABLE_ENABLE_PUBLIC_AI;
+  delete process.env.VERCEL;
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -138,6 +143,25 @@ describe('dispatchTurn — DAG scheduler integration', () => {
 
     expect(result.dispatchStatus).toBe('completed');
     expect(result.records.every((r) => r.status === 'completed')).toBe(true);
+  });
+
+  it('forces local dispatch on Vercel even when a request asks for an AI adapter', async () => {
+    process.env.VERCEL = '1';
+    process.env.ROUNDTABLE_OPENAI_API_KEY = 'test-key';
+    process.env.ROUNDTABLE_OPENAI_BASE_URL = 'https://model.test/v1';
+    process.env.ROUNDTABLE_OPENAI_MODEL = 'test-model';
+
+    const turn = await createTurn({ actor, message: '@atlas build the navbar.' });
+    const result = await approveTurn({
+      actor,
+      turnId: turn.id,
+      decision: 'approve',
+      autoDispatch: true,
+      agentAdapter: 'openai-compat',
+    });
+
+    expect(result.dispatchStatus).toBe('completed');
+    expect(result.dispatchAdapter).toBe('local-dispatch');
   });
 
   it('does not keep final delivery blocked after a fixer repairs a blocking review', async () => {
