@@ -9,6 +9,7 @@ import {
   makeFixerTask,
   plannedTaskPatches,
   repairedTargetArtifact,
+  shouldAttemptFix,
 } from '../src/server/actions/turn-actions.js';
 import type { ScheduledTask } from '../src/server/actions/scheduler.js';
 import type { Artifact, PlanTask } from '../src/server/types.js';
@@ -142,6 +143,21 @@ describe('makeFixerTask — repair context deps', () => {
     const fixer = makeFixerTask(failed, { message: 'agent_task_failed' });
     expect(fixer.replanOnly).toBeUndefined();
     expect(fixer.brief).not.toContain('RE-PLANNING ONLY');
+  });
+
+  it('does not attempt fixer loops for runtime infrastructure failures', () => {
+    expect(shouldAttemptFix({
+      message: 'runtime_exit_1: API Error: 402 Error from provider(roundtable-openai-compatible,deepseek-chat: 402): Insufficient Balance',
+    })).toBe(false);
+    expect(shouldAttemptFix({
+      message: 'runtime_exit_1: Service startup timeout, please manually run `ccr start` to start the service',
+    })).toBe(false);
+    expect(shouldAttemptFix({
+      message: 'review_found_issues: 1 critical · 0 high',
+    })).toBe(true);
+    expect(shouldAttemptFix({
+      message: 'safety_block',
+    })).toBe(true);
   });
 });
 

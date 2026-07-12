@@ -29,6 +29,8 @@ afterEach(async () => {
   delete process.env.MINIMAX_BASE_URL;
   delete process.env.MINIMAX_MODEL;
   delete process.env.ROUNDTABLE_AGENT_ADAPTER;
+  delete process.env.ROUNDTABLE_ENABLE_PUBLIC_AI;
+  delete process.env.VERCEL;
   vi.unstubAllGlobals();
   await rm(tempDir, { recursive: true, force: true });
 });
@@ -180,5 +182,33 @@ describe('settings actions', () => {
     expect(openai?.apiKeySource).toBe('env');
     expect(openai?.baseUrl).toBe('https://env-model.test/v1');
     expect(JSON.stringify(state)).not.toContain('env-secret');
+  });
+
+  it('disables shared AI providers on Vercel unless explicitly enabled', async () => {
+    process.env.VERCEL = '1';
+    process.env.ROUNDTABLE_OPENAI_API_KEY = 'env-secret';
+    process.env.ROUNDTABLE_OPENAI_BASE_URL = 'https://env-model.test/v1';
+    process.env.ROUNDTABLE_OPENAI_MODEL = 'env-model';
+    await saveSettings({
+      defaultAgentAdapter: 'openai-compat',
+      providers: [{
+        provider: 'openai-compatible',
+        enabled: true,
+        baseUrl: 'https://settings-model.test/v1',
+        model: 'settings-model',
+        apiKey: 'settings-secret',
+      }],
+    });
+
+    const state = await listSettingsState();
+    const openai = state.providers.find((provider) => provider.provider === 'openai-compatible');
+
+    expect(await resolveDefaultAgentAdapter()).toBe('local-dispatch');
+    expect(state.effectiveAgentAdapter).toBe('local-dispatch');
+    expect(openai?.enabled).toBe(false);
+    expect(openai?.apiKeySet).toBe(false);
+    expect(openai?.apiKeySource).toBeNull();
+    expect(JSON.stringify(state)).not.toContain('env-secret');
+    expect(JSON.stringify(state)).not.toContain('settings-secret');
   });
 });

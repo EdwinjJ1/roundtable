@@ -21,7 +21,7 @@ import {
 } from '../mission-actions.js';
 import { hasBlockingFinding, safetyEnabled, scanArtifact } from '../safety.js';
 import { runScheduler, type ScheduledTask, type TaskResult } from '../scheduler.js';
-import { resolveDefaultAgentAdapter } from '../settings-actions.js';
+import { publicAiExecutionDisabled, resolveDefaultAgentAdapter } from '../settings-actions.js';
 import { artifactsFromRun, finalReportArtifact, reviewerSummaryArtifact, upsertArtifacts } from './artifacts.js';
 import { buildDocsAuditContext } from './doc-policy.js';
 import { ActionError } from './errors.js';
@@ -32,6 +32,7 @@ import {
   repairedTargetArtifact,
   reviewRequestsFix,
   reviewSeverities,
+  shouldAttemptFix,
 } from './fix-loop.js';
 import { formatHandoffContext, handoffsForTasks } from './handoffs.js';
 import { formatWorkingStyleForPrompt, plannedTaskPatches, retitleDownstreamTasks } from './planning.js';
@@ -138,7 +139,11 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   if (!turn) throw new ActionError('turn_not_found', 404);
   if (turn.dispatchStatus === 'completed' && turn.dispatch.length > 0) return dispatchResponse(turn);
 
-  const adapter = normalizeAdapter(input.agentAdapter ?? await resolveDefaultAgentAdapter() ?? undefined);
+  const adapter = normalizeAdapter(
+    publicAiExecutionDisabled()
+      ? 'local-dispatch'
+      : input.agentAdapter ?? await resolveDefaultAgentAdapter() ?? undefined,
+  );
   const runtimeEnv = { ...process.env };
   const workspace = await prepareWorkspace(turn);
   await updateTurn(turn.id, (current) => ({
@@ -390,6 +395,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     maxFixRounds: maxFixRounds(),
     now: nowIso,
     onFailure: (failed, error) => {
+      if (!shouldAttemptFix(error)) return null;
       const fixer = makeFixerTask(failed, error);
       // Point the fixer at the concrete deliverable it repairs (the previewable
       // artifact among the failed task and its upstream deps — for a failed

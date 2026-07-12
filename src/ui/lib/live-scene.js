@@ -121,7 +121,7 @@ function workByAgent(liveActivity, tasks, agents) {
   return work;
 }
 
-function buildLocalScene(baseScene, liveTurns, agents) {
+function buildLocalScene(baseScene, liveTurns, agents, planningPlayback = {}) {
   const latest = latestLiveTurn(liveTurns);
   if (!latest) return baseScene;
   const status = { ...baseScene.status };
@@ -129,6 +129,54 @@ function buildLocalScene(baseScene, liveTurns, agents) {
   const result = latest.result;
   const completed = result?.dispatchStatus === 'completed';
   status.orchestrator = latest.status === 'pending' ? 'working' : result ? 'done' : 'idle';
+
+  const meeting = result?.planningMeeting;
+  const meetingMessages = meeting?.messages || [];
+  const meetingActive = latest.status === 'pending'
+    || (meetingMessages.length > 0 && planningPlayback.meetingComplete === false);
+  if (meetingActive) {
+    const index = Math.max(0, Math.min(
+      planningPlayback.meetingMessageIndex ?? 0,
+      Math.max(0, meetingMessages.length - 1),
+    ));
+    const message = meetingMessages[index] || null;
+    for (const participant of meeting?.participants || ['orchestrator']) {
+      if (status[participant] !== undefined) status[participant] = 'thinking';
+    }
+    const pendingText = /[\u3400-\u9fff]/.test(latest.message || '')
+      ? '我先读取项目上下文，然后请团队依次从计划、架构、执行和风险角度发言。'
+      : 'I am reading the project context, then the team will speak in order: plan, architecture, execution, and risk.';
+    const speech = message
+      ? {
+          agentId: agents[message.agentId] ? message.agentId : 'orchestrator',
+          mode: 'speaking',
+          text: meetingSpeechText(message.content),
+          phase: message.phase,
+          step: index + 1,
+          steps: Math.max(meetingMessages.length, 1),
+        }
+      : {
+          agentId: 'orchestrator', mode: 'speaking', text: pendingText, phase: 'opening', step: 1, steps: 1,
+        };
+    status[speech.agentId] = 'speaking';
+    return {
+      ...baseScene,
+      live: true,
+      started: true,
+      speech,
+      planPosted: false,
+      work: {},
+      run: {
+        phase: 'planning_meeting',
+        message: latest.message,
+        meetingStep: index + 1,
+        meetingSteps: Math.max(meetingMessages.length, 1),
+      },
+      status,
+      tasks: [],
+      placed: [],
+    };
+  }
 
   const roleCursor = {};
   const ownerFor = (task) => {
@@ -166,10 +214,17 @@ function buildLocalScene(baseScene, liveTurns, agents) {
     ...baseScene,
     live: true,
     started: true,
-    planPosted: true,
+    speech: null,
+    planPosted: Boolean(result?.plan),
     work,
     run: {
-      phase: latest.status === 'pending' ? 'planning' : completed ? 'completed' : 'running',
+      phase: completed
+        ? 'completed'
+        : result?.dispatchStatus === 'running'
+          ? 'running'
+          : result?.dispatchStatus === 'not_started' && result?.approvalStatus !== 'approved'
+            ? 'awaiting_approval'
+            : 'running',
       message: latest.message,
       error: latest.error,
       provider: result?.provider,
@@ -187,4 +242,27 @@ function buildLocalScene(baseScene, liveTurns, agents) {
   };
 }
 
-export { latestLiveTurn, livePlanArtifact, normalizeLiveArtifacts, liveArtifactsFromTurns, buildLocalScene };
+function meetingSpeechText(content) {
+  const spoken = String(content || '')
+    .replace(/\r/g, '')
+    .split(/\n+/)
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  return spoken.length > 520 ? `${spoken.slice(0, 520).trim()}…` : spoken;
+}
+
+function planningMessageDuration(content) {
+  return Math.min(11_000, Math.max(6_000, String(content || '').length * 27));
+}
+
+export {
+  latestLiveTurn,
+  livePlanArtifact,
+  normalizeLiveArtifacts,
+  liveArtifactsFromTurns,
+  buildLocalScene,
+  meetingSpeechText,
+  planningMessageDuration,
+};

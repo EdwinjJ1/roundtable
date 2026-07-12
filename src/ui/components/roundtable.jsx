@@ -545,7 +545,7 @@ function Figure({ agent, isUser, head, size, speaking }) {
 
 /* ---- Speech / activity card --------------------------------------------- */
 function SpeechCard({ agent, speech, aggregate, onAction, s, drop }) {
-  const w = Math.round(304 * Math.max(0.94, s));
+  const w = Math.round(364 * Math.max(0.94, s));
   const accent = agent.pm ? 'var(--pm)' : agent.color;
   const wrap = drop ? { top: '100%', transform: 'translate(-50%, 10px)' } : { top: -8, transform: 'translate(-50%, -100%)' };
   return (
@@ -557,6 +557,10 @@ function SpeechCard({ agent, speech, aggregate, onAction, s, drop }) {
           {!agent.pm && <RoleTag agent={agent} />}
           {agent.pm && <span className="mono" style={{ fontSize: 10, letterSpacing: '.08em', textTransform: 'uppercase',
             color: 'var(--text-faint)' }}>facilitator</span>}
+          {speech?.steps > 1 && (
+            <span className="mono tnum" style={{ marginLeft: 'auto', fontSize: 10.5, color: 'var(--text-faint)',
+              whiteSpace: 'nowrap' }}>{speech.step}/{speech.steps}</span>
+          )}
         </div>
         {aggregate ? (
           <>
@@ -587,7 +591,10 @@ function SpeechCard({ agent, speech, aggregate, onAction, s, drop }) {
             <Spinner size={13} color={accent} /><span>{speech.tool?.name} is working…</span>
           </div>
         ) : (
-          <div style={{ fontSize: 14.5, color: 'var(--text)', lineHeight: 1.5 }}>{speech.text}<span className="rt-caret" /></div>
+          <div style={{ fontSize: 14.25, color: 'var(--text)', lineHeight: 1.62, whiteSpace: 'pre-wrap',
+            maxHeight: 280, overflowY: 'auto', paddingRight: 3, scrollbarWidth: 'thin' }}>
+            {speech.text}<span className="rt-caret" />
+          </div>
         )}
       </div>
       <div style={{ position: 'absolute', left: '50%', width: 13, height: 13, transform: 'translateX(-50%) rotate(45deg)',
@@ -632,6 +639,11 @@ function NowDoingBubble({ agent, now, s }) {
 }
 
 /* ---- Seat ---------------------------------------------------------------- */
+function speechPlacementForSeat(seat, speech) {
+  const show = Boolean(speech && speech.agentId === seat.agentId);
+  return { show, drop: Boolean(show && seat.head) };
+}
+
 function Seat({ seat, agents, scene, dim, onAction, onSeatClick, activity }) {
   const { x, y, s } = seatPos(seat.angle);
   const z = Math.round(200 + y);
@@ -650,7 +662,8 @@ function Seat({ seat, agents, scene, dim, onAction, onSeatClick, activity }) {
   const agent = isUser ? null : agents[seat.agentId];
   const st = isUser ? 'idle' : scene.status[seat.agentId];
   const speaking = st === 'speaking' || st === 'working' || st === 'thinking';
-  const showSpeech = scene.speech && scene.speech.agentId === seat.agentId && !seat.head;
+  const speechPlacement = speechPlacementForSeat(seat, scene.speech);
+  const showSpeech = speechPlacement.show;
   const raisingHand = scene.decision && scene.decision.agentId === seat.agentId;
   const figSize = Math.round((seat.head ? 56 : 60) * s);
   const clickable = !isUser && onSeatClick;
@@ -666,7 +679,8 @@ function Seat({ seat, agents, scene, dim, onAction, onSeatClick, activity }) {
       opacity: dim ? 0.5 : 1, filter: dim ? 'saturate(.7)' : 'none', textAlign: 'center' }}>
 
       {showSpeech && agent && (
-        <SpeechCard agent={agent} speech={scene.speech} aggregate={null} onAction={onAction} s={s} drop={false} />
+        <SpeechCard agent={agent} speech={scene.speech} aggregate={null} onAction={onAction} s={s}
+          drop={speechPlacement.drop} />
       )}
       {nowDoing && agent && (
         <NowDoingBubble agent={agent} now={nowDoing} s={s} />
@@ -807,4 +821,12 @@ function WhiteboardZoom({ tasks, agents, onClose, live, run, posted = true }) {
   );
 }
 
-export { RoundtableScene, WhiteboardZoom, sceneAt, meetingNotes, buildSeats, seatPos };
+export {
+  RoundtableScene,
+  WhiteboardZoom,
+  sceneAt,
+  meetingNotes,
+  buildSeats,
+  seatPos,
+  speechPlacementForSeat,
+};

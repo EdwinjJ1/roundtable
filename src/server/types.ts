@@ -360,6 +360,9 @@ export type PlanTask = {
   stageKind?: string | undefined;
   requiredCapabilities?: string[] | undefined;
   brief: string;
+  // One user-facing sentence describing the concrete work this CLI owns.
+  // Unlike `brief`, this is safe to display directly in the approval plan.
+  objective?: string | undefined;
   deps: string[];
   parallel: boolean;
   // Optional scheduler hints. `priority` orders tasks inside a single wave
@@ -379,6 +382,12 @@ export type PlanTask = {
   // allowed to touch source/product files. Implementation stays with the
   // build stage that runs once the repaired plan is in place.
   replanOnly?: boolean | undefined;
+  // Concrete checks agreed during the planning meeting. They travel with the
+  // task handoff so an implementer knows what "done" means before execution.
+  acceptanceCriteria?: string[] | undefined;
+  // Meeting decisions that shaped this task. These are stable ids into
+  // LocalTurn.planningMeeting.decisions, not free-form duplicated prose.
+  meetingDecisionIds?: string[] | undefined;
 };
 
 export type Plan = {
@@ -522,6 +531,43 @@ export type Mission = {
   updatedAt: string;
 };
 
+export type PlanningMeetingPhase = 'opening' | 'position' | 'facilitation' | 'commitment' | 'challenge' | 'decision';
+
+export type PlanningMeetingMessage = {
+  id: string;
+  phase: PlanningMeetingPhase;
+  agentId: string;
+  role: AgentRole;
+  content: string;
+  createdAt: string;
+  wordLimit: number;
+  // Position messages are independent. Challenge/decision messages list the
+  // earlier statements they were allowed to inspect.
+  references: string[];
+};
+
+export type PlanningMeetingDecision = {
+  id: string;
+  summary: string;
+  rationale: string;
+  taskIds: string[];
+};
+
+export type PlanningMeeting = {
+  status: 'completed' | 'fallback' | 'skipped';
+  algorithm: 'independent-positions-linear-challenge-v1' | 'facilitated-role-relay-v2';
+  provider: ModelProviderKind | 'local-deterministic';
+  model: string;
+  participants: string[];
+  messages: PlanningMeetingMessage[];
+  decisions: PlanningMeetingDecision[];
+  risks: string[];
+  unresolved: string[];
+  repositorySummary: string;
+  startedAt: string;
+  completedAt: string;
+};
+
 export type LocalTurn = {
   id: string;
   localChatId: string | null;
@@ -553,6 +599,9 @@ export type LocalTurn = {
   artifacts: Artifact[];
   intake: Intake;
   plan: Plan;
+  // Optional for backward compatibility with turns persisted before planning
+  // meetings were introduced. New non-question turns always populate it.
+  planningMeeting?: PlanningMeeting | null | undefined;
   workflow: Record<string, unknown> | null;
   workflowRun: WorkflowRun | null;
   mission: Mission | null;

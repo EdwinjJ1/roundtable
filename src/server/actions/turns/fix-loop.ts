@@ -15,6 +15,18 @@ export function reviewRequestsFix(): boolean {
   return process.env.ROUNDTABLE_REVIEW_TRIGGERS_FIX !== 'false';
 }
 
+export function shouldAttemptFix(error: { message: string }): boolean {
+  return !isRuntimeInfrastructureFailure(error.message);
+}
+
+export function isRuntimeInfrastructureFailure(message: string): boolean {
+  return /\b(runtime_(exit|timeout|idle_timeout)|runtime_not_ready|model_provider_not_configured|model_provider_missing_model)\b/i.test(message)
+    || /Service startup timeout|Missing command:|Missing API provider key/i.test(message)
+    || /API Error:\s*(401|402|403|429|5\d\d)\b/i.test(message)
+    || /Error from provider\([^)]*:\s*(401|402|403|429|5\d\d)\)/i.test(message)
+    || /Insufficient Balance|quota|rate limit|unauthorized|forbidden/i.test(message);
+}
+
 // Tasks whose report gates delivery through the review→fix loop: the quality
 // reviewer, and the architect's post-build check (role architect in a
 // review-kind stage — its upfront design task in the plan stage is NOT a

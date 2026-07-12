@@ -65,14 +65,20 @@ describe('Roundtable clean workflow', () => {
     // agent runs.
     expect(turn.approvalStatus).toBe('pending');
     expect(turn.needsApproval).toBe(true);
-    // Default chain: planning → architecture (nova) → build → review + arch check.
-    expect(turn.plan.tasks).toHaveLength(5);
-    expect(turn.plan.tasks[0]?.owner).toBe('orchestrator');
+    // The API meeting completes planning; only architecture → build → review
+    // + architecture check remain as CLI work after approval.
+    expect(turn.plan.tasks).toHaveLength(4);
+    expect(turn.plan.tasks[0]?.owner).toBe('nova');
+    expect(turn.plan.tasks.some((task) => task.role === 'planner')).toBe(false);
     expect(turn.plan.tasks.map((task) => task.owner)).toContain('nova');
     expect(turn.plan.tasks.map((task) => task.owner)).toContain('atlas');
     expect(turn.plan.tasks.map((task) => task.owner)).toContain('vera');
     expect(turn.plan.tasks.every((task) => Array.isArray(task.deps))).toBe(true);
     expect(turn.plan.tasks.every((task) => typeof task.parallel === 'boolean')).toBe(true);
+    expect(turn.plan.summary).not.toContain('Executable plan after the planning meeting');
+    expect(turn.plan.tasks.every((task) => typeof task.objective === 'string' && task.objective.length > 0)).toBe(true);
+    expect(turn.planningMeeting?.messages.some((message) => message.phase === 'challenge')).toBe(true);
+    expect(turn.planningMeeting?.decisions.length).toBeGreaterThan(0);
 
     const approval = await approveTurn({
       actor,
@@ -83,7 +89,7 @@ describe('Roundtable clean workflow', () => {
     });
 
     expect(approval.dispatchStatus).toBe('completed');
-    expect(approval.records).toHaveLength(5);
+    expect(approval.records).toHaveLength(4);
     expect(approval.artifacts.length).toBeGreaterThanOrEqual(3);
     expect(approval.workspacePath).toContain('workspaces/test');
     expect(approval.artifacts.find((artifact) => artifact.id.startsWith('task_vera_'))?.preview)
@@ -158,20 +164,20 @@ describe('Roundtable clean workflow', () => {
     expect(planned.plan.tasks[0]?.brief).toContain('Clarified requirements');
   });
 
-  it('shows downstream tasks as placeholders before the plan, then concrete titles after', async () => {
+  it('resolves downstream task titles during the meeting before approval', async () => {
     const turn = await createTurn({
       actor,
       message: '生成一个镜头测评网站',
     });
 
-    // Plan-time: only the planner knows the goal. Build/Review are placeholders
-    // that await the plan — they must NOT pre-fill the user's request.
-    const planTitles = turn.plan.tasks.map((task) => task.title);
-    expect(planTitles[0]).toContain('生成一个镜头测评网站'); // the Plan task names the goal
+    // The meeting has completed before createTurn returns, so the executable
+    // CLI plan is already concrete and contains no second planner pass.
+    expect(turn.plan.tasks.some((task) => task.role === 'planner')).toBe(false);
     const build = turn.plan.tasks.find((task) => task.role === 'implementer');
     const review = turn.plan.tasks.find((task) => task.role === 'reviewer');
-    expect(build?.title).toMatch(/awaiting plan/i);
-    expect(review?.title).not.toContain('生成一个镜头测评网站');
+    expect(build?.title).not.toMatch(/awaiting plan/i);
+    expect(build?.title).toContain('生成一个镜头测评网站');
+    expect(review?.title).toContain('生成一个镜头测评网站');
 
     await approveTurn({
       actor,
@@ -181,8 +187,7 @@ describe('Roundtable clean workflow', () => {
       agentAdapter: 'local-dispatch',
     });
 
-    // After the planner runs, the plan defines the work — downstream tasks get
-    // concrete, named titles (no longer "awaiting plan").
+    // Dispatch preserves the already-agreed task names.
     const after = (await listTurns(undefined, { actor })).find((t) => t.id === turn.id);
     const buildAfter = after?.plan.tasks.find((task) => task.role === 'implementer');
     const reviewAfter = after?.plan.tasks.find((task) => task.role === 'reviewer');
@@ -223,15 +228,15 @@ describe('Roundtable clean workflow', () => {
       message: 'Build an API endpoint for user login and review it.',
     });
 
-    expect(turn.plan.tasks.map((task) => task.owner)).toEqual(['orchestrator', 'nova', 'beam', 'vera', 'nova']);
-    expect(turn.plan.tasks[1]?.deps).toEqual(['task_planning']);
-    expect(turn.plan.tasks[2]?.deps).toEqual(['task_planning', 'task_nova']);
-    expect(turn.plan.tasks[3]?.deps).toEqual(['task_beam']);
+    expect(turn.plan.tasks.map((task) => task.owner)).toEqual(['nova', 'beam', 'vera', 'nova']);
+    expect(turn.plan.tasks[0]?.deps).toEqual([]);
+    expect(turn.plan.tasks[1]?.deps).toEqual(['task_nova']);
+    expect(turn.plan.tasks[2]?.deps).toEqual(['task_beam']);
     // The architecture check reviews the build in parallel with the quality review.
-    expect(turn.plan.tasks[4]?.id).toBe('task_nova_review');
-    expect(turn.plan.tasks[4]?.deps).toEqual(['task_beam']);
-    expect(turn.plan.tasks[4]?.stageId).toBe('review');
-    expect(turn.plan.tasks[4]?.stageKind).toBe('review');
+    expect(turn.plan.tasks[3]?.id).toBe('task_nova_review');
+    expect(turn.plan.tasks[3]?.deps).toEqual(['task_beam']);
+    expect(turn.plan.tasks[3]?.stageId).toBe('review');
+    expect(turn.plan.tasks[3]?.stageKind).toBe('review');
   });
 
   it('ignores stale external adapter requests unless explicitly enabled', () => {

@@ -23,9 +23,11 @@ import { emptyWorkingStyle, getWorkingStyleSnapshot } from '../skill-actions.js'
 import { baseArtifacts, upsertArtifacts } from './artifacts.js';
 import { ActionError } from './errors.js';
 import { handoffForTurn } from './handoffs.js';
-import { intakeFromMessage, planFromMessage } from './planning.js';
+import { conductPlanningMeeting } from './planning-meeting.js';
+import { intakeFromMessage, planFromMessage, plannedTaskPatches } from './planning.js';
 import { turnResponse, type TurnResponse } from './responses.js';
 import { getTurn } from './turn-store.js';
+import { workspacePathForChat } from './workspace.js';
 
 export type CreateTurnInput = {
   message: string;
@@ -101,7 +103,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
     return turnResponse(turnWithMission);
   }
 
-  const turn = buildTurn({
+  const draftTurn = buildTurn({
     turnId,
     chatId,
     ownerId: input.actor?.id ?? null,
@@ -112,6 +114,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
     template,
     workingStyle,
   });
+  const turn = await attachPlanningMeeting(draftTurn, message);
   const mission = await createMission({
     actor: input.actor,
     chatId,
@@ -216,6 +219,7 @@ function buildTurn(opts: {
     artifacts,
     intake,
     plan,
+    planningMeeting: null,
     workflow: workflowTemplate,
     workflowRun: null,
     mission,
@@ -256,6 +260,7 @@ function buildTurn(opts: {
     artifacts,
     intake,
     plan,
+    planningMeeting: null,
     workflow: workflowTemplate,
     workflowRun,
     mission,
@@ -279,7 +284,7 @@ export async function answerClarification(input: {
   const enrichedMessage = applyAnswers(existing.message, existing.clarifyQuestions, input.answers);
   const now = nowIso();
   const resumedTemplate = await resolveWorkflowTemplate(existing.workflowTemplateId, enrichedMessage);
-  const planned = buildTurn({
+  const draftPlan = buildTurn({
     turnId: existing.id,
     chatId: existing.localChatId,
     ownerId: existing.ownerId,
@@ -291,6 +296,7 @@ export async function answerClarification(input: {
     template: resumedTemplate,
     workingStyle: existing.workingStyle,
   });
+  const planned = await attachPlanningMeeting(draftPlan, enrichedMessage);
   // Preserve the original user-facing message; keep the enriched text in the plan.
   const syncedMission = await updateMissionForPlannedTurn({
     ...planned,
@@ -316,4 +322,85 @@ export async function answerClarification(input: {
     }
   });
   return turnResponse(turnWithWorkflowRun);
+}
+
+async function attachPlanningMeeting(turn: LocalTurn, planningMessage: string): Promise<LocalTurn> {
+  if (turn.needsClarification || turn.intake.intentType === 'question' || turn.plan.tasks.length === 0) {
+    return { ...turn, planningMeeting: null };
+  }
+  const workspace = await workspacePathForChat(turn.localChatId);
+  const { meeting, plan: deliberatedPlan } = await conductPlanningMeeting({
+    message: planningMessage,
+    plan: turn.plan,
+    workspace,
+    now: nowIso(),
+  });
+  const plan = executablePlanAfterMeeting(deliberatedPlan, planningMessage);
+  return {
+    ...turn,
+    plan,
+    artifacts: baseArtifacts(
+      turn.id,
+      turn.localChatId ?? `local-${turn.id}`,
+      planningMessage,
+      turn.intake,
+      plan,
+      turn.workingStyle,
+    ),
+    planningMeeting: meeting,
+    pmMessage: `Planning meeting complete — ${meeting.participants.length} seats completed the facilitated relay, ${meeting.decisions.length} decision${meeting.decisions.length === 1 ? '' : 's'} locked, ${plan.tasks.length} CLI step${plan.tasks.length === 1 ? '' : 's'} ready for approval.`,
+  };
+}
+
+// The API planning meeting itself satisfies the planner task. Do not invoke a
+// coding CLI to plan the same request a second time: remove the completed
+// planner node, reconnect its downstream dependencies, and resolve placeholder
+// titles before the user sees the executable plan.
+function executablePlanAfterMeeting(plan: LocalTurn['plan'], message: string): LocalTurn['plan'] {
+  const plannerTasks = plan.tasks.filter((task) => task.role === 'planner');
+  const hasExecutableWork = plan.tasks.some((task) => task.role !== 'planner');
+  if (!hasExecutableWork || plannerTasks.length === 0) return plan;
+
+  const removed = new Set(plannerTasks.map((task) => task.id));
+  const byId = new Map(plan.tasks.map((task) => [task.id, task]));
+  const patches = new Map<string, { title: string; brief: string }>();
+  for (const planner of plannerTasks) {
+    for (const [taskId, patch] of plannedTaskPatches(plan.tasks, planner.id, message)) {
+      patches.set(taskId, patch);
+    }
+  }
+  const executableTasks = plan.tasks
+    .filter((task) => !removed.has(task.id))
+    .map((task) => {
+      const expanded = new Set<string>();
+      const visit = (dependencyId: string) => {
+        const dependency = byId.get(dependencyId);
+        if (!removed.has(dependencyId) || !dependency) {
+          if (dependencyId !== task.id) expanded.add(dependencyId);
+          return;
+        }
+        for (const upstream of dependency.deps) visit(upstream);
+      };
+      for (const dependencyId of task.deps) visit(dependencyId);
+      const patch = patches.get(task.id);
+      const preservedContext = task.brief.split('\n\n').slice(1).join('\n\n');
+      return {
+        ...task,
+        ...(patch
+          ? {
+              title: patch.title,
+              brief: [patch.brief, preservedContext].filter(Boolean).join('\n\n'),
+            }
+          : {}),
+        deps: [...expanded],
+      };
+    });
+  return {
+    ...plan,
+    // Keep the Planner's real meeting conclusion. The task count is already
+    // visible in the approval UI; replacing this with a scheduler sentence
+    // discarded the only user-facing summary of what the team decided.
+    summary: plan.summary,
+    tasks: executableTasks,
+  };
 }
