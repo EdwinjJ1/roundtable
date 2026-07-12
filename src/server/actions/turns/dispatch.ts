@@ -23,6 +23,7 @@ import { hasBlockingFinding, safetyEnabled, scanArtifact } from '../safety.js';
 import { runScheduler, type ScheduledTask, type TaskResult } from '../scheduler.js';
 import { resolveDefaultAgentAdapter } from '../settings-actions.js';
 import { artifactsFromRun, finalReportArtifact, reviewerSummaryArtifact, upsertArtifacts } from './artifacts.js';
+import { buildDocsAuditContext } from './doc-policy.js';
 import { ActionError } from './errors.js';
 import {
   isReviewGateTask,
@@ -215,11 +216,18 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
       task: effectiveTask,
       artifacts: contextArtifacts,
     });
+    // The architect's delivery-gate review doubles as the docs & memory audit:
+    // it sees every Markdown artifact and each agent's memory health, and its
+    // blocking findings route through the same review→fix loop.
+    const docsAudit = effectiveTask.role === 'architect' && isReviewGateTask(effectiveTask)
+      ? await buildDocsAuditContext({ workspace, artifacts: contextArtifacts }).catch(() => '')
+      : '';
     const handoffContext = [
       formatWorkingStyleForPrompt(turn.workingStyle)
         ? `# User working style\n\n${formatWorkingStyleForPrompt(turn.workingStyle)}`
         : '',
       continuationContext,
+      docsAudit,
       formatHandoffContext(handoffCard, depOutputs),
     ].filter(Boolean).join('\n\n---\n\n');
 

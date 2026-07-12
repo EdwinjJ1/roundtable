@@ -18,7 +18,7 @@ import { bundlePreviewArtifacts, withBundledPreview } from '../lib/preview-html'
 import { RT } from '../lib/rt';
 import { trpc } from '../lib/trpc';
 
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef } = React;
 
 function Drawer({ art, agents, onClose }) {
   if (!art) return null;
@@ -220,6 +220,7 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
         {tabBtn('files', `Files · ${created.length + provided.length}`)}
         {tabBtn('notes', 'Notes')}
         {tabBtn('memory', 'Skills')}
+        {tabBtn('agentMemory', 'Memory')}
         <button onClick={onClose} style={{ ...iconBtn, border: 'none', background: 'transparent' }}><Icon name="x" size={15} /></button>
       </div>
       <div style={{ borderBottom: '1px solid var(--border)' }} />
@@ -251,11 +252,133 @@ function InspectorPanel({ tab, setTab, clock, agents, scene, width, onOpenArtifa
         </div>
       ) : tab === 'memory' ? (
         <MemoryPanel memory={memory} />
+      ) : tab === 'agentMemory' ? (
+        <MemoryTab activeChatId={activeChatId} authed={authed} agents={agents} />
       ) : live || hasLocalTurns ? (
         <LiveNotes agents={agents} artifacts={created} handoffs={liveHandoffs} />
       ) : (
         <NotesContent clock={clock} agents={agents} notes={notes} />
       )}
+    </div>
+  );
+}
+
+/* ---- memory tab: this project's per-agent facts, with export -------------- */
+function MemoryTab({ activeChatId, authed, agents }) {
+  const overviewQ = trpc.agentMemory.overview.useQuery(
+    { chatId: activeChatId || undefined },
+    { enabled: !!authed, refetchInterval: 20000 },
+  );
+  const utils = trpc.useUtils();
+  const [exporting, setExporting] = useState(false);
+  const [importMessage, setImportMessage] = useState('');
+  const importInputRef = useRef(null);
+  const importMemory = trpc.agentMemory.import.useMutation({
+    onSuccess: (result) => {
+      setImportMessage(`Imported ${result.imported.length} fact${result.imported.length === 1 ? '' : 's'}.`);
+      utils.agentMemory.overview.invalidate();
+    },
+    onError: (error) => setImportMessage(`Import failed: ${error.message}`),
+  });
+  const onExport = async () => {
+    if (!activeChatId) return;
+    setExporting(true);
+    try {
+      const bundle = await utils.agentMemory.export.fetch({ chatId: activeChatId });
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `roundtable-memory-${bundle.exportedAt.slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  };
+  const onImport = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || !activeChatId) return;
+    setImportMessage('');
+    try {
+      const bundle = JSON.parse(await file.text());
+      if (!Array.isArray(bundle?.files) || bundle.files.length === 0) throw new Error('Bundle has no memory files.');
+      await importMemory.mutateAsync({ chatId: activeChatId, files: bundle.files });
+    } catch (error) {
+      setImportMessage(`Import failed: ${error instanceof Error ? error.message : 'Invalid bundle.'}`);
+    }
+  };
+  const overviews = overviewQ.data ?? [];
+  // alpha() takes a 0-100 percentage, matching the rest of primitives.jsx.
+  const badge = (label, color) => (
+    <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999,
+      background: alpha(color, 12), color }}>{label}</span>
+  );
+  // `agents` is a map keyed by agent id (see FileRow: agents[art.ownerAgentId]).
+  const profileFor = (agentId) => (agents || {})[agentId];
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 24px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '0 0 12px' }}>
+        <div style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
+          Agent memory
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input ref={importInputRef} type="file" accept="application/json,.json" onChange={onImport}
+            style={{ display: 'none' }} />
+          <button onClick={() => importInputRef.current?.click()} disabled={!activeChatId || importMemory.isPending}
+            title="Import a Roundtable memory bundle into this project"
+            style={{ ...iconBtn, width: 'auto', padding: '0 9px', fontSize: 11.5, fontWeight: 600, gap: 5 }}>
+            <Icon name="plus" size={13} /> {importMemory.isPending ? 'Importing…' : 'Import'}
+          </button>
+          <button onClick={onExport} disabled={exporting || overviews.length === 0 || !activeChatId}
+            title="Download this project's agent memory as a portable bundle"
+            style={{ ...iconBtn, width: 'auto', padding: '0 10px', fontSize: 11.5, fontWeight: 600, gap: 5,
+              opacity: overviews.length === 0 || !activeChatId ? 0.5 : 1 }}>
+            <Icon name="clip" size={13} /> {exporting ? 'Exporting…' : 'Export'}
+          </button>
+        </div>
+      </div>
+      {importMessage && (
+        <div style={{ fontSize: 11.5, color: importMessage.startsWith('Import failed') ? 'var(--bad)' : 'var(--ok)',
+          margin: '-5px 0 10px' }}>{importMessage}</div>
+      )}
+      {overviewQ.isLoading ? (
+        <div style={{ padding: '8px 2px' }}><Spinner /></div>
+      ) : overviews.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: 'var(--text-faint)', fontStyle: 'italic', padding: '4px 2px' }}>
+          No memory yet — agents write facts here as they work, and reuse them in later missions.
+        </div>
+      ) : overviews.map((agent) => (
+        <div key={agent.agentId} style={{ marginBottom: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, margin: '0 0 7px' }}>
+            {profileFor(agent.agentId) && <Avatar agent={profileFor(agent.agentId)} size={22} />}
+            <span style={{ fontSize: 13, fontWeight: 600 }}>{agent.displayName}</span>
+            {profileFor(agent.agentId)
+              ? <RoleTag agent={profileFor(agent.agentId)} />
+              : <span style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>@{agent.role}</span>}
+          </div>
+          {agent.compactionNeeds.map((need, index) => (
+            <div key={index} style={{ fontSize: 11.5, color: 'var(--warn, #b45309)', margin: '0 0 6px', lineHeight: 1.4 }}>
+              ⚠ {need}
+            </div>
+          ))}
+          {agent.facts.map((fact) => (
+            <div key={fact.slug} style={{ display: 'flex', alignItems: 'flex-start', gap: 8,
+              padding: '7px 9px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border)',
+              background: 'var(--surface-2)', marginBottom: 6 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--mono, monospace)' }}>{fact.slug}</span>
+                  {fact.type !== 'note' && badge(fact.type, fact.type === 'unreviewed' ? '#b45309' : 'var(--text-faint)')}
+                  {fact.overLimit && badge('over budget', '#dc2626')}
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--text-faint)', marginTop: 2, lineHeight: 1.4 }}>{fact.description}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }

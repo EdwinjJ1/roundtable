@@ -36,6 +36,16 @@ async function clearRunOutput(workspace: string): Promise<void> {
   }
 }
 
+// The workspace path a chat's runs use, WITHOUT creating or clearing anything —
+// for read paths (memory panel, exports) that must never touch run state.
+export async function workspacePathForChat(chatId: string | null): Promise<string | null> {
+  if (!chatId) return null;
+  const projectWorkspace = await workspaceFromChat(chatId);
+  if (projectWorkspace) return projectWorkspace;
+  const root = resolve(process.env.ROUNDTABLE_WORKSPACE_ROOT || '.roundtable/workspaces');
+  return resolve(root, chatId);
+}
+
 async function workspaceFromChat(chatId: string | null): Promise<string | null> {
   if (!chatId) return null;
   const data = await readData();
