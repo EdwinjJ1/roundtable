@@ -4,7 +4,6 @@ import {
   createBreakoutRoom,
   listBreakoutRooms,
   postBreakoutMessage,
-  postDmMessage,
 } from './actions/breakout-actions.js';
 import {
   createChat,
@@ -83,15 +82,6 @@ const breakoutsRouter = createTRPCRouter({
       content: z.string().min(1),
     }))
     .mutation(({ ctx, input }) => postBreakoutMessage(ctx.user, input)),
-  // 1:1 DM with a single agent: find-or-create the (chat, agent) room and post
-  // in one call, so the client never races itself into duplicate rooms.
-  postDm: protectedProcedure
-    .input(z.object({
-      chatId: z.string().min(1),
-      agentId: z.string().min(1),
-      content: z.string().min(1),
-    }))
-    .mutation(({ ctx, input }) => postDmMessage(ctx.user, input)),
 });
 
 const agentMemoryRouter = createTRPCRouter({

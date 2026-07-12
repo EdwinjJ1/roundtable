@@ -4,10 +4,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createBreakoutRoom,
-  getOrCreateDmRoom,
   listBreakoutRooms,
   postBreakoutMessage,
-  postDmMessage,
 } from '../src/server/actions/breakout-actions.js';
 import { createChat, createMessage } from '../src/server/actions/chat-actions.js';
 import { saveSettings } from '../src/server/actions/settings-actions.js';
@@ -183,77 +181,5 @@ describe('breakout rooms', () => {
 
     await expect(postBreakoutMessage(actor, { roomId: room.id, content: 'still open?' }))
       .rejects.toThrow('breakout_room_closed');
-  });
-});
-
-describe('dm rooms (1:1 with a single agent)', () => {
-  it('getOrCreateDmRoom creates a single-participant room and is idempotent per (chat, agent)', async () => {
-    const chatId = await makeChat();
-    const first = await getOrCreateDmRoom(actor, { chatId, agentId: 'beam' });
-    expect(first.participantAgentIds).toEqual(['beam']);
-    expect(first.status).toBe('open');
-
-    const second = await getOrCreateDmRoom(actor, { chatId, agentId: 'beam' });
-    expect(second.id).toBe(first.id);
-
-    // A different agent in the same chat gets its own room.
-    const other = await getOrCreateDmRoom(actor, { chatId, agentId: 'vera' });
-    expect(other.id).not.toBe(first.id);
-    expect((await listBreakoutRooms(actor, chatId))).toHaveLength(2);
-  });
-
-  it('rejects a DM to an agent id not in the roster', async () => {
-    const chatId = await makeChat();
-    await expect(getOrCreateDmRoom(actor, { chatId, agentId: 'ghost-agent' }))
-      .rejects.toThrow('breakout_unknown_participant');
-  });
-
-  it('postDmMessage persists the note and a reply authored by the DM agent itself', async () => {
-    stubModel('Here is my take on the auth flow.');
-    process.env.ROUNDTABLE_OPENAI_API_KEY = 'test-key';
-    process.env.ROUNDTABLE_OPENAI_BASE_URL = 'https://example.test/v1';
-    process.env.ROUNDTABLE_OPENAI_MODEL = 'test-model';
-    const chatId = await makeChat();
-
-    await postDmMessage(actor, { chatId, agentId: 'beam', content: 'Walk me through the auth flow.' });
-
-    const [room] = await listBreakoutRooms(actor, chatId);
-    expect(room!.participantAgentIds).toEqual(['beam']);
-    expect(room!.messages).toHaveLength(2);
-    expect(room!.messages[0]!.authorType).toBe('user');
-    const reply = room!.messages[1]!;
-    expect(reply.authorType).toBe('agent');
-    expect(reply.authorId).toBe('beam');
-    expect(reply.content).toContain('auth flow');
-  });
-
-  it('a second DM message lands in the same room, building one thread', async () => {
-    stubModel('Reply.');
-    process.env.ROUNDTABLE_OPENAI_API_KEY = 'test-key';
-    process.env.ROUNDTABLE_OPENAI_BASE_URL = 'https://example.test/v1';
-    process.env.ROUNDTABLE_OPENAI_MODEL = 'test-model';
-    const chatId = await makeChat();
-
-    await postDmMessage(actor, { chatId, agentId: 'beam', content: 'First note.' });
-    await postDmMessage(actor, { chatId, agentId: 'beam', content: 'Second note.' });
-
-    const rooms = await listBreakoutRooms(actor, chatId);
-    expect(rooms).toHaveLength(1);
-    expect(rooms[0]!.messages).toHaveLength(4);
-  });
-
-  it('frames the model prompt as a private 1:1, not a multi-participant breakout', async () => {
-    const readBody = stubModel('Noted.');
-    process.env.ROUNDTABLE_OPENAI_API_KEY = 'test-key';
-    process.env.ROUNDTABLE_OPENAI_BASE_URL = 'https://example.test/v1';
-    process.env.ROUNDTABLE_OPENAI_MODEL = 'test-model';
-    const chatId = await makeChat();
-
-    await postDmMessage(actor, { chatId, agentId: 'beam', content: 'Quick question.' });
-
-    const body = readBody().body as { messages: Array<{ role: string; content: string }> };
-    const systemText = body.messages.find((m) => m.role === 'system')?.content || '';
-    expect(systemText).toContain('private 1:1 room');
-    expect(systemText).not.toContain('Other participants');
   });
 });
