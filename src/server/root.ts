@@ -104,8 +104,7 @@ const agentMemoryRouter = createTRPCRouter({
   import: protectedProcedure
     .input(z.object({
       chatId: z.string().min(1),
-      agentId: z.string().min(1),
-      files: z.array(z.object({ slug: z.string().min(1), content: z.string().min(1) })).min(1).max(60),
+      files: z.array(z.object({ path: z.string().min(1), content: z.string().min(1) })).min(1).max(300),
     }))
     .mutation(({ ctx, input }) => importAgentMemory(ctx.user, input)),
 });

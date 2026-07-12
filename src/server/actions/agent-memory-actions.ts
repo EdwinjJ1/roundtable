@@ -74,16 +74,40 @@ export async function exportAgentMemory(
   };
 }
 
-// Receiving end of a bundle: facts land in ONE agent's memory in THIS chat's
-// project workspace.
+// Receiving end of the exact export shape. The agent id and slug travel in the
+// portable path, so a downloaded bundle can be imported without being
+// rewritten or split by hand.
 export async function importAgentMemory(
   actor: Actor,
-  input: { chatId: string; agentId: string; files: Array<{ slug: string; content: string }> },
+  input: { chatId: string; files: MemoryBundle['files'] },
 ): Promise<{ imported: string[]; skipped: string[] }> {
-  requireAgent(input.agentId);
   const workspace = await resolveWorkspace(actor, input.chatId);
   if (!workspace) throw new Error('chat_not_found');
-  return importProjectFacts({ workspace, agentId: input.agentId, files: input.files });
+  return importMemoryBundleIntoWorkspace(workspace, input.files);
+}
+
+export async function importMemoryBundleIntoWorkspace(
+  workspace: string,
+  bundleFiles: MemoryBundle['files'],
+): Promise<{ imported: string[]; skipped: string[] }> {
+  const byAgent = new Map<string, Array<{ slug: string; content: string }>>();
+  for (const file of bundleFiles) {
+    const match = /^([a-z0-9_-]+)\/([a-z0-9_-]+)\.md$/i.exec(file.path);
+    if (!match) throw new Error('invalid_memory_bundle_path');
+    const [, agentId, slug] = match;
+    requireAgent(agentId!);
+    const files = byAgent.get(agentId!) ?? [];
+    files.push({ slug: slug!, content: file.content });
+    byAgent.set(agentId!, files);
+  }
+  const imported: string[] = [];
+  const skipped: string[] = [];
+  for (const [agentId, files] of byAgent) {
+    const result = await importProjectFacts({ workspace, agentId, files });
+    imported.push(...result.imported.map((slug) => `${agentId}/${slug}.md`));
+    skipped.push(...result.skipped.map((slug) => `${agentId}/${slug}.md`));
+  }
+  return { imported, skipped };
 }
 
 function factView(fact: MemoryFact): MemoryFactView {

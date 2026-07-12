@@ -27,11 +27,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   loadAgentMemory,
-  importProjectFacts,
   projectMemoryDir,
   writeProjectFact,
   MEMORY_LIMITS,
 } from '../server/actions/agent-memory.js';
+import { importMemoryBundleIntoWorkspace } from '../server/actions/agent-memory-actions.js';
 import { runAgentTask } from '../server/actions/agent-runner.js';
 import { extractMemorySection } from '../server/actions/memory-extract.js';
 import { saveAgentRuntimeConfig } from '../server/actions/runtime-actions.js';
@@ -210,10 +210,10 @@ async function scenario4(workspaceB: string): Promise<void> {
 async function scenario5(workspaceA: string, workspaceB: string): Promise<void> {
   const checks: Check[] = [];
   const source = await loadAgentMemory({ workspace: workspaceA, agentId: AGENT });
-  const bundle = source.facts.map((fact) => ({ slug: fact.slug, content: fact.text }));
+  const bundle = source.facts.map((fact) => ({ path: `${AGENT}/${fact.slug}.md`, content: fact.text }));
   check(checks, 'export bundle contains project A facts', bundle.length >= 2, `got ${bundle.length}`);
 
-  const imported = await importProjectFacts({ workspace: workspaceB, agentId: AGENT, files: bundle });
+  const imported = await importMemoryBundleIntoWorkspace(workspaceB, bundle);
   check(checks, 'bundle imports into project B', imported.imported.length === bundle.length, imported.skipped.join(', '));
 
   const target = await loadAgentMemory({ workspace: workspaceB, agentId: AGENT });

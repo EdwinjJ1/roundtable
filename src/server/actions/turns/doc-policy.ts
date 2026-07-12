@@ -12,7 +12,7 @@
   architect's audit while the workspace and Files panel stay clean.
 */
 
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Artifact, PlanTask } from '../../types.js';
 import { AGENT_ROSTER } from '../agent-roster.js';
@@ -88,9 +88,10 @@ export async function quarantineDocs(input: {
     const target = join(input.workspace, '.roundtable', 'quarantine', input.taskId, item.file.path);
     try {
       await mkdir(dirname(target), { recursive: true });
-      await rename(join(input.workspace, item.file.path), target).catch(async () => {
-        // rename can fail across devices or on odd mounts; fall back to copy.
-        await writeFile(target, item.file.text, 'utf8');
+      await moveFileToQuarantine({
+        source: join(input.workspace, item.file.path),
+        target,
+        text: item.file.text,
       });
       moved.push(item.file.path);
     } catch {
@@ -112,6 +113,25 @@ export async function quarantineDocs(input: {
     if (wrote) folded.push(item.file.path);
   }
   return { moved, folded, failed };
+}
+
+export async function moveFileToQuarantine(
+  input: { source: string; target: string; text: string },
+  overrides: Partial<{
+    rename: typeof rename;
+    writeFile: typeof writeFile;
+    unlink: typeof unlink;
+  }> = {},
+): Promise<void> {
+  const move = overrides.rename ?? rename;
+  try {
+    await move(input.source, input.target);
+  } catch {
+    // Cross-device and unusual mounts cannot rename atomically. A fallback is
+    // only a successful move once the original has also been removed.
+    await (overrides.writeFile ?? writeFile)(input.target, input.text, 'utf8');
+    await (overrides.unlink ?? unlink)(input.source);
+  }
 }
 
 /*

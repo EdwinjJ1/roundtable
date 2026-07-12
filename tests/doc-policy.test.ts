@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadAgentMemory } from '../src/server/actions/agent-memory.js';
 import { AGENT_ROSTER } from '../src/server/actions/agent-roster.js';
 import type { AgentProfile } from '../src/server/actions/agent-roster.js';
-import { applyDocPolicy, quarantineDocs } from '../src/server/actions/turns/doc-policy.js';
+import { applyDocPolicy, moveFileToQuarantine, quarantineDocs } from '../src/server/actions/turns/doc-policy.js';
 import type { ChangedWorkspaceFile } from '../src/server/actions/turns/workspace-scan.js';
 import type { PlanTask } from '../src/server/types.js';
 
@@ -125,6 +125,21 @@ describe('quarantineDocs', () => {
     const fact = memory.facts.find((item) => item.slug === 'unreviewed-notes');
     expect(fact?.type).toBe('unreviewed');
     expect(fact?.text).toContain('lens scoring');
+  });
+
+  it('removes the source when rename falls back to copy across filesystems', async () => {
+    const source = join(workspace, 'SUMMARY.md');
+    const target = join(workspace, '.roundtable', 'quarantine', 'task_1', 'SUMMARY.md');
+    await writeFile(source, '# Summary\n\nKeep this detail.', 'utf8');
+    await mkdir(join(workspace, '.roundtable', 'quarantine', 'task_1'), { recursive: true });
+
+    await moveFileToQuarantine(
+      { source, target, text: '# Summary\n\nKeep this detail.' },
+      { rename: async () => { throw new Error('EXDEV'); } },
+    );
+
+    await expect(access(source)).rejects.toThrow();
+    expect(await readFile(target, 'utf8')).toContain('Keep this detail.');
   });
 });
 

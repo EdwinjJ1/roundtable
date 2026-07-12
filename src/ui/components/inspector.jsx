@@ -18,7 +18,7 @@ import { bundlePreviewArtifacts, withBundledPreview } from '../lib/preview-html'
 import { RT } from '../lib/rt';
 import { trpc } from '../lib/trpc';
 
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef } = React;
 
 function Drawer({ art, agents, onClose }) {
   if (!art) return null;
@@ -271,6 +271,15 @@ function MemoryTab({ activeChatId, authed, agents }) {
   );
   const utils = trpc.useUtils();
   const [exporting, setExporting] = useState(false);
+  const [importMessage, setImportMessage] = useState('');
+  const importInputRef = useRef(null);
+  const importMemory = trpc.agentMemory.import.useMutation({
+    onSuccess: (result) => {
+      setImportMessage(`Imported ${result.imported.length} fact${result.imported.length === 1 ? '' : 's'}.`);
+      utils.agentMemory.overview.invalidate();
+    },
+    onError: (error) => setImportMessage(`Import failed: ${error.message}`),
+  });
   const onExport = async () => {
     if (!activeChatId) return;
     setExporting(true);
@@ -287,6 +296,19 @@ function MemoryTab({ activeChatId, authed, agents }) {
       setExporting(false);
     }
   };
+  const onImport = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || !activeChatId) return;
+    setImportMessage('');
+    try {
+      const bundle = JSON.parse(await file.text());
+      if (!Array.isArray(bundle?.files) || bundle.files.length === 0) throw new Error('Bundle has no memory files.');
+      await importMemory.mutateAsync({ chatId: activeChatId, files: bundle.files });
+    } catch (error) {
+      setImportMessage(`Import failed: ${error instanceof Error ? error.message : 'Invalid bundle.'}`);
+    }
+  };
   const overviews = overviewQ.data ?? [];
   // alpha() takes a 0-100 percentage, matching the rest of primitives.jsx.
   const badge = (label, color) => (
@@ -301,13 +323,26 @@ function MemoryTab({ activeChatId, authed, agents }) {
         <div style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
           Agent memory
         </div>
-        <button onClick={onExport} disabled={exporting || overviews.length === 0 || !activeChatId}
-          title="Download this project's agent memory as a portable bundle"
-          style={{ ...iconBtn, width: 'auto', padding: '0 10px', fontSize: 11.5, fontWeight: 600, gap: 5,
-            opacity: overviews.length === 0 || !activeChatId ? 0.5 : 1 }}>
-          <Icon name="clip" size={13} /> {exporting ? 'Exporting…' : 'Export'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input ref={importInputRef} type="file" accept="application/json,.json" onChange={onImport}
+            style={{ display: 'none' }} />
+          <button onClick={() => importInputRef.current?.click()} disabled={!activeChatId || importMemory.isPending}
+            title="Import a Roundtable memory bundle into this project"
+            style={{ ...iconBtn, width: 'auto', padding: '0 9px', fontSize: 11.5, fontWeight: 600, gap: 5 }}>
+            <Icon name="plus" size={13} /> {importMemory.isPending ? 'Importing…' : 'Import'}
+          </button>
+          <button onClick={onExport} disabled={exporting || overviews.length === 0 || !activeChatId}
+            title="Download this project's agent memory as a portable bundle"
+            style={{ ...iconBtn, width: 'auto', padding: '0 10px', fontSize: 11.5, fontWeight: 600, gap: 5,
+              opacity: overviews.length === 0 || !activeChatId ? 0.5 : 1 }}>
+            <Icon name="clip" size={13} /> {exporting ? 'Exporting…' : 'Export'}
+          </button>
+        </div>
       </div>
+      {importMessage && (
+        <div style={{ fontSize: 11.5, color: importMessage.startsWith('Import failed') ? 'var(--bad)' : 'var(--ok)',
+          margin: '-5px 0 10px' }}>{importMessage}</div>
+      )}
       {overviewQ.isLoading ? (
         <div style={{ padding: '8px 2px' }}><Spinner /></div>
       ) : overviews.length === 0 ? (
