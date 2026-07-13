@@ -6,6 +6,7 @@ import {
   deleteWorkflowTemplate,
   listWorkflowTemplates,
   resolveWorkflowTemplate,
+  saveWorkflowRevision,
   saveWorkflowTemplate,
   workflowTemplateById,
   WorkflowTemplateError,
@@ -135,7 +136,7 @@ describe('custom template storage — override by id', () => {
     for (const stage of template.stages) {
       stage.seats = stage.seats.filter((seatItem) => seatItem.ref.kind !== 'role' || seatItem.ref.role !== 'architect');
     }
-    await saveWorkflowTemplate(template);
+    await saveWorkflowRevision(actor, { template, expectedRevision: 0 });
 
     const turn = await createTurn({ actor, message: 'Build a landing page and review it.' });
     // Planner was satisfied by the API meeting; the edited template still

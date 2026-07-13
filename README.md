@@ -4,11 +4,11 @@
 
 # Roundtable
 
-**Your AI dev squad, around one table.**
+**Turn AI coding sessions into reusable, reviewable workflows.**
 
-Describe what to build — then *watch* a persistent squad of AI agents plan it,
-implement it in parallel, review it, and ship it. Every file, diff, preview,
-and decision stays on the table.
+Roundtable is the visual workflow and governance layer over local AI agents such
+as Claude Code and Codex. Save a successful way of working, run it again, and
+stay in control at planning, permission, review, and delivery gates.
 
 [![CI](https://github.com/EdwinjJ1/roundtable/actions/workflows/ci.yml/badge.svg)](https://github.com/EdwinjJ1/roundtable/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

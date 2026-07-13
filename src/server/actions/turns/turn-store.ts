@@ -35,6 +35,11 @@ export async function deleteTurn(turnId: string, access?: TurnAccess | undefined
   const turn = await getTurn(turnId, access);
   if (!turn) throw new ActionError('turn_not_found', 404);
   await mutateData((data) => {
+    const executionRunIds = new Set(
+      data.executionRuns.filter((run) => run.turnId === turnId).map((run) => run.id),
+    );
+    data.taskAttempts = data.taskAttempts.filter((attempt) => !executionRunIds.has(attempt.executionRunId));
+    data.executionRuns = data.executionRuns.filter((run) => run.turnId !== turnId);
     data.turns = data.turns.filter((item) => item.id !== turnId);
     // A mission can span several turns of a chat. Deleting its only turn
     // deletes the mission; otherwise the mission survives with the turn

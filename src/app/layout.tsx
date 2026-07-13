@@ -4,7 +4,7 @@ import { Providers } from '@/ui/components/providers';
 
 export const metadata = {
   title: 'Roundtable',
-  description: 'Multi-agent collaboration workbench',
+  description: 'Turn AI coding sessions into reusable, reviewable workflows.',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

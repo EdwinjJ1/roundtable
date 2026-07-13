@@ -7,6 +7,7 @@ export default tseslint.config(
       'dist/**',
       'build/**',
       '.next/**',
+      '.next-playwright/**',
       'next-env.d.ts',
       'coverage/**',
       '.roundtable/**',

@@ -1,8 +1,28 @@
 {
-  "name": "roundtable-clean",
-  "version": "0.1.0",
+  "name": "@roundtable/app",
+  "version": "0.1.0-beta.1",
+  "description": "Turn AI coding sessions into reusable, reviewable workflows.",
   "private": true,
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EdwinjJ1/roundtable.git"
+  },
+  "homepage": "https://github.com/EdwinjJ1/roundtable#readme",
+  "bugs": {
+    "url": "https://github.com/EdwinjJ1/roundtable/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "multi-agent",
+    "workflow-orchestration"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -11,6 +31,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:e2e": "node scripts/run-playwright.mjs",
     "cli": "tsx src/cli/main.ts",
     "migrate:postgres": "tsx src/cli/migrate-json-to-postgres.ts",
     "migrate:postgres:jsonb": "ROUNDTABLE_TARGET_STORE_DRIVER=postgres tsx src/cli/migrate-json-to-postgres.ts",
@@ -37,6 +58,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "^20.14.0",
     "@types/pg": "^8.20.0",
     "@types/react": "^18.3.0",

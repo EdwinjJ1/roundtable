@@ -21,7 +21,7 @@ const actor: Actor = {
 };
 
 beforeEach(async () => {
-  tempDir = await mkdtemp(join(tmpdir(), 'roundtable-clean-'));
+  tempDir = await mkdtemp(join(tmpdir(), 'roundtable-workflow-'));
   process.env.ROUNDTABLE_DATA_PATH = join(tempDir, 'data.json');
   process.env.ROUNDTABLE_WORKSPACE_ROOT = join(tempDir, 'workspaces');
   process.env.ROUNDTABLE_AGENT_ADAPTER = 'local-dispatch';
