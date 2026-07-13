@@ -56,7 +56,7 @@ const removeX = { position: 'absolute', top: -5, right: -5, width: 15, height: 1
   background: 'var(--bad)', color: '#fff', cursor: 'pointer', display: 'none', placeItems: 'center', padding: 0 };
 
 /* ---- SeatChips : the roster for a stage (roles, optionally bound to agents) - */
-function SeatChips({ seats, agents, editable, onRemove, onAdd }) {
+function SeatChips({ seats, agents, editable, onRemove, onAdd, addLabel }) {
   const [menu, setMenu] = useStateW(false);
   const members = (RT.WORKBENCH.members || []).map((id) => agents[id]).filter(Boolean);
   return (
@@ -85,9 +85,13 @@ function SeatChips({ seats, agents, editable, onRemove, onAdd }) {
       })}
       {editable && onAdd && (
         <>
-          <button onClick={() => setMenu((o) => !o)} title="Add a role or member" style={{ width: 24, height: 24, borderRadius: '50%',
-            display: 'grid', placeItems: 'center', border: '1.5px dashed var(--border-strong)', background: 'transparent',
-            color: 'var(--text-faint)', cursor: 'pointer' }}><Icon name="plus" size={12} /></button>
+          <button onClick={() => setMenu((o) => !o)} type="button" aria-expanded={menu} aria-label="Add a role or person"
+            style={{ minWidth: 24, height: 28, padding: addLabel ? '0 9px' : 0, borderRadius: addLabel ? 'var(--r-sm)' : '50%',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              border: '1.5px dashed var(--border-strong)', background: 'var(--surface-2)',
+              color: 'var(--text-muted)', cursor: 'pointer', font: 'inherit', fontSize: 11.5, fontWeight: 600 }}>
+            <Icon name="plus" size={12} />{addLabel && <span>{addLabel}</span>}
+          </button>
           {menu && (
             <div className="rt-zoom" style={{ position: 'absolute', top: '100%', left: 0, zIndex: 30, marginTop: 6, width: 220,
               background: 'var(--surface)', borderRadius: 'var(--r-card)', border: '1px solid var(--border)', boxShadow: 'var(--shadow-pop)',
@@ -149,17 +153,26 @@ function StageCard({ stage, idx, agents, onEdit, onMove, onRemove, onConfigure, 
         </div>
       </div>
       <div style={{ padding: '12px 13px' }}>
-        <textarea value={stage.desc} onChange={(e) => onEdit('desc', e.target.value)} rows={2} title="Edit description" spellCheck={false}
+        <div style={cardQuestionLabel}>What happens</div>
+        <textarea value={stage.desc} onChange={(e) => onEdit('desc', e.target.value)} rows={2}
+          aria-label={`What happens in ${stage.name}`} placeholder="Describe the work this step should do." spellCheck={false}
           onFocus={editFocus} onBlur={editBlur}
           style={{ width: '100%', font: 'inherit', fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 11,
             minHeight: 38, resize: 'vertical', background: 'transparent', border: '1px solid transparent', borderRadius: 6,
             outline: 'none', padding: '4px', boxSizing: 'border-box' }} />
-        <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '.07em', textTransform: 'uppercase', color: 'var(--text-faint)', marginBottom: 7 }}>Who runs it</div>
-        <SeatChips seats={stage.seats} agents={agents} editable={false} />
+        <div style={cardQuestionLabel}>Expected result</div>
+        <div style={{ minHeight: 30, marginBottom: 12, fontSize: 11.5, lineHeight: 1.45,
+          color: stage.expectedOutputs?.length ? 'var(--text-muted)' : 'var(--warn)' }}>
+          {stage.expectedOutputs?.[0] || 'Not defined yet'}
+        </div>
+        <div style={cardQuestionLabel}>Responsible</div>
+        {stage.seats?.length
+          ? <SeatChips seats={stage.seats} agents={agents} editable={false} />
+          : <div style={{ fontSize: 11.5, color: 'var(--warn)' }}>No role assigned yet</div>}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, paddingTop: 11, borderTop: '1px solid var(--border)' }}>
           {gate && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 500, color: 'var(--accent)',
             background: tint('var(--accent)', 12), padding: '2px 8px', borderRadius: 4 }}><Icon name={gate.icon} size={11} /> {gate.label}</span>}
-          {!gate && <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>no gate</span>}
+          {!gate && <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>Continues automatically</span>}
           {!stage.fixed && <button onClick={onConfigure} style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 5,
             border: 'none', background: 'transparent', color: 'var(--accent)', font: 'inherit', fontSize: 12, fontWeight: 500, cursor: 'pointer', padding: 0 }}>
             <Icon name="edit" size={12} /> Configure</button>}
@@ -167,6 +180,22 @@ function StageCard({ stage, idx, agents, onEdit, onMove, onRemove, onConfigure, 
       </div>
     </div>
   );
+}
+const cardQuestionLabel = { fontSize: 10, fontWeight: 650, letterSpacing: '.05em', textTransform: 'uppercase',
+  color: 'var(--text-faint)', marginBottom: 5 };
+
+function DrawerQuestion({ number, title, hint, children }) {
+  return <section style={{ marginBottom: 22 }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 9, marginBottom: 10 }}>
+      <span aria-hidden="true" style={{ width: 22, height: 22, display: 'grid', placeItems: 'center', flexShrink: 0,
+        borderRadius: '50%', background: tint('var(--accent)', 13), color: 'var(--accent)', fontSize: 10.5, fontWeight: 750 }}>{number}</span>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>{title}</div>
+        <div style={{ marginTop: 2, fontSize: 11.5, lineHeight: 1.45, color: 'var(--text-muted)' }}>{hint}</div>
+      </div>
+    </div>
+    <div style={{ paddingLeft: 31 }}>{children}</div>
+  </section>;
 }
 
 /* ---- StageDrawer : the per-stage deep editor (slide-over) ------------------- */
@@ -183,42 +212,52 @@ function StageDrawer({ stage, agents, onPatch, onClose }) {
     if (stage.parallelGroup) delete next.parallelGroup; else next.parallelGroup = stage.id;
     onPatch(next, true);
   };
+  const setExpectedOutputs = (value) => onPatch({ expectedOutputs: value.split('\n').map((line) => line.trim()).filter(Boolean) });
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 130, background: alpha('#1b1826', 32), display: 'flex', justifyContent: 'flex-end' }}>
-      <div onClick={(e) => e.stopPropagation()} className="rt-zoom" style={{ width: 'min(380px, 100%)', height: '100%', background: 'var(--surface)',
+      <div onClick={(e) => e.stopPropagation()} className="rt-zoom" role="dialog" aria-modal="true" aria-label={`Set up ${stage.name}`}
+        style={{ width: 'min(430px, 100%)', height: '100%', background: 'var(--surface)',
         borderLeft: '1px solid var(--border)', boxShadow: 'var(--shadow-pop)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 16px', borderBottom: '1px solid var(--border)' }}>
           <span style={{ display: 'grid', placeItems: 'center', width: 30, height: 30, borderRadius: 9, background: tint('var(--accent)', 13), color: 'var(--accent)' }}><Icon name={stage.icon} size={16} /></span>
-          <div style={{ flex: 1, fontSize: 15, fontWeight: 600 }}>Configure “{stage.name}”</div>
-          <button onClick={onClose} style={{ ...ghostBtn, padding: 6 }}><Icon name="x" size={15} /></button>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>Set up “{stage.name}”</div>
+            <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--text-muted)' }}>Define one clear, reviewable step.</div>
+          </div>
+          <button onClick={onClose} type="button" aria-label="Close step setup" style={{ ...ghostBtn, padding: 6 }}><Icon name="x" size={15} /></button>
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
-          <div style={drawerLabel}>Icon</div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 18 }}>
-            {ICON_OPTS.map((ic) => (
-              <button key={ic} onClick={() => onPatch({ icon: ic })} title={ic} style={{ width: 32, height: 32, borderRadius: 8, display: 'grid', placeItems: 'center',
-                cursor: 'pointer', border: `1px solid ${stage.icon === ic ? 'var(--accent)' : 'var(--border)'}`,
-                background: stage.icon === ic ? tint('var(--accent)', 12) : 'var(--surface)', color: stage.icon === ic ? 'var(--accent)' : 'var(--text-muted)' }}>
-                <Icon name={ic} size={15} /></button>
-            ))}
-          </div>
+          <DrawerQuestion number="1" title="What happens in this step?"
+            hint="Write the instruction the assigned role should follow. Be specific enough to run it again.">
+            <label htmlFor={`stage-instructions-${stage.id}`} style={fieldLabel}>Instructions</label>
+            <textarea id={`stage-instructions-${stage.id}`} value={stage.desc} onChange={(e) => onPatch({ desc: e.target.value })}
+              rows={4} spellCheck={false} placeholder="Example: Review the implementation for accessibility and list any blocking issues."
+              style={drawerTextarea} />
+          </DrawerQuestion>
 
-          <div style={drawerLabel}>Instructions</div>
-          <textarea value={stage.desc} onChange={(e) => onPatch({ desc: e.target.value })} rows={3} spellCheck={false}
-            style={{ width: '100%', font: 'inherit', fontSize: 13, color: 'var(--text)', lineHeight: 1.5, marginBottom: 18, resize: 'vertical',
-              background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', outline: 'none', padding: '9px 11px', boxSizing: 'border-box' }} />
+          <DrawerQuestion number="2" title="What should this step produce?"
+            hint="Describe the result the next step can inspect or use. Add one result per line.">
+            <label htmlFor={`stage-output-${stage.id}`} style={fieldLabel}>Expected result</label>
+            <textarea id={`stage-output-${stage.id}`} value={(stage.expectedOutputs || []).join('\n')}
+              onChange={(e) => setExpectedOutputs(e.target.value)} rows={3} spellCheck={false}
+              placeholder="Example: A review report with pass/fail status and actionable findings."
+              style={drawerTextarea} />
+          </DrawerQuestion>
 
-          <div style={drawerLabel}>Roster</div>
-          <div style={{ marginBottom: 18 }}>
-            <SeatChips seats={stage.seats} agents={agents} editable onRemove={removeSeat} onAdd={addSeat} />
-          </div>
+          <DrawerQuestion number="3" title="Who is responsible?"
+            hint="Assign a role or person who has the right capability for this work.">
+            <SeatChips seats={stage.seats} agents={agents} editable onRemove={removeSeat} onAdd={addSeat} addLabel="Add role or person" />
+            {!stage.seats?.length && <div role="status" style={{ marginTop: 8, padding: '7px 9px', borderRadius: 'var(--r-sm)',
+              color: 'var(--warn)', background: alpha('var(--warn)', 9), fontSize: 11.5 }}>No one is assigned. Choose an owner before using this workflow.</div>}
+          </DrawerQuestion>
 
-          <div style={drawerLabel}>Quality gate</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginBottom: 18 }}>
+          <DrawerQuestion number="4" title="When can the workflow continue?"
+            hint="Choose whether this step flows through automatically or waits for approval.">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
             {GATES.map((g) => {
               const on = (stage.gate?.kind || 'none') === g.kind;
               return (
-                <button key={g.kind} onClick={() => setGate(g.kind)} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, textAlign: 'left',
+                <button key={g.kind} type="button" aria-pressed={on} onClick={() => setGate(g.kind)} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, textAlign: 'left',
                   padding: '10px 12px', borderRadius: 'var(--r-sm)', cursor: 'pointer', font: 'inherit',
                   border: `1.5px solid ${on ? 'var(--accent)' : 'var(--border)'}`, background: on ? tint('var(--accent)', 8) : 'var(--surface)' }}>
                   <span style={{ marginTop: 1, display: 'grid', placeItems: 'center', width: 16, height: 16, borderRadius: '50%', flexShrink: 0,
@@ -229,21 +268,38 @@ function StageDrawer({ stage, agents, onPatch, onClose }) {
                 </button>
               );
             })}
-          </div>
+            </div>
+          </DrawerQuestion>
 
-          <div style={{ paddingTop: 14, borderTop: '1px solid var(--border)' }}>
-            <Toggle on={!!stage.parallelGroup} onClick={toggleParallel} label="Run this stage's seats in parallel" />
-          </div>
+          <details style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+            <summary style={{ cursor: 'pointer', color: 'var(--text-muted)', fontSize: 12, fontWeight: 650 }}>Advanced settings</summary>
+            <div style={{ marginTop: 14 }}>
+              <div style={drawerLabel}>Step icon</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 18 }}>
+                {ICON_OPTS.map((ic) => (
+                  <button key={ic} type="button" onClick={() => onPatch({ icon: ic })} aria-label={`Use ${ic} icon`} aria-pressed={stage.icon === ic}
+                    style={{ width: 32, height: 32, borderRadius: 8, display: 'grid', placeItems: 'center', cursor: 'pointer',
+                      border: `1px solid ${stage.icon === ic ? 'var(--accent)' : 'var(--border)'}`,
+                      background: stage.icon === ic ? tint('var(--accent)', 12) : 'var(--surface)', color: stage.icon === ic ? 'var(--accent)' : 'var(--text-muted)' }}>
+                    <Icon name={ic} size={15} /></button>
+                ))}
+              </div>
+              <Toggle on={!!stage.parallelGroup} onClick={toggleParallel} label="Run assigned roles in parallel" />
+            </div>
+          </details>
         </div>
       </div>
     </div>
   );
 }
 const drawerLabel = { fontSize: 10.5, fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-faint)', marginBottom: 8 };
+const fieldLabel = { display: 'block', marginBottom: 6, fontSize: 11, fontWeight: 650, color: 'var(--text-muted)' };
+const drawerTextarea = { width: '100%', font: 'inherit', fontSize: 13, color: 'var(--text)', lineHeight: 1.5, resize: 'vertical',
+  background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', outline: 'none', padding: '9px 11px', boxSizing: 'border-box' };
 
 function AddStageButton({ onClick }) {
   return (
-    <button onClick={onClick} title="Add stage" style={{ flexShrink: 0, alignSelf: 'center', width: 30, height: 30, borderRadius: '50%',
+    <button onClick={onClick} type="button" aria-label="Add a step here" title="Add a step here" style={{ flexShrink: 0, alignSelf: 'center', width: 30, height: 30, borderRadius: '50%',
       border: '1.5px dashed var(--border-strong)', background: 'var(--surface)', color: 'var(--text-faint)', cursor: 'pointer',
       display: 'grid', placeItems: 'center', margin: '0 -7px', zIndex: 2 }}><Icon name="plus" size={14} /></button>
   );
@@ -336,9 +392,12 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
     const wf = serverMode ? createServerWorkflowDraft() : { id: 'wf-user-' + Date.now(), name: 'Untitled workflow', tag: 'Yours', builtin: false, origin: { kind: 'new' },
       planning: { cut: 'by_role', clarifyThreshold: 0.6, maxClarifyQuestions: 3 }, version: 1, updatedAt: new Date().toISOString(),
       stages: [
-        { id: 'intake', name: 'Intake', icon: 'clip', kind: 'intake', desc: 'Capture the goal in plain language.', seats: [{ ref: { kind: 'user' } }], fixed: true, gate: { kind: 'none' } },
-        { id: 's-build-' + Date.now(), name: 'Build', icon: 'code', kind: 'work', desc: 'Describe what happens here.', seats: [], gate: { kind: 'none' } },
-        { id: 's-ship-' + Date.now(), name: 'Ship', icon: 'rocket', kind: 'ship', desc: 'Deploy to production.', seats: [], gate: { kind: 'user_approval' } },
+        { id: 'intake', name: 'Intake', icon: 'clip', kind: 'intake', desc: 'Capture the goal, constraints, and definition of done.',
+          expectedOutputs: ['A clear brief ready for planning.'], seats: [{ ref: { kind: 'user' } }], fixed: true, gate: { kind: 'none' } },
+        { id: 's-build-' + Date.now(), name: 'Build', icon: 'code', kind: 'work', desc: 'Create the requested deliverable from the approved brief.',
+          expectedOutputs: ['A working deliverable ready for review.'], seats: [], gate: { kind: 'none' } },
+        { id: 's-ship-' + Date.now(), name: 'Ship', icon: 'rocket', kind: 'ship', desc: 'Prepare the reviewed result for delivery.',
+          expectedOutputs: ['An approved delivery package.'], seats: [], gate: { kind: 'user_approval' } },
       ] };
     const id = wf.id;
     if (serverMode) {
@@ -408,9 +467,10 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
     editSessionController.current.markDirty();
     setStages((ss) => {
       const n = [...ss];
-      n.splice(i, 0, { id: 'custom-' + Date.now(), name: 'New stage', icon: 'dot', kind: 'work', desc: 'Describe what happens here.', seats: [], gate: { kind: 'none' } });
+      n.splice(i, 0, { id: 'custom-' + Date.now(), name: 'New step', icon: 'dot', kind: 'work', desc: '', expectedOutputs: [], seats: [], gate: { kind: 'none' } });
       return n;
     });
+    setDrawer(i);
   };
 
   const loadRemoteRevision = () => {
@@ -466,21 +526,43 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
           <div style={{ flex: 1, minWidth: 280 }}>
             <h2 style={{ margin: '0 0 5px', fontSize: 21, fontWeight: 600, letterSpacing: '-.01em' }}>Workflow</h2>
             <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-muted)', lineHeight: 1.55, maxWidth: 620 }}>
-              A workflow is the <b>packaged process</b> your workbench runs every time. Start from a proven one and ship,
-              or reshape any stage to build your own.
+              A workflow is a <b>repeatable recipe for your AI team</b>. It runs from left to right, one clear step at a time.
             </p>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <button onClick={newWorkflow} disabled={saving} type="button" style={{ ...ghostBtn, background: 'var(--accent)', color: '#fff',
+              border: 'none', fontWeight: 700, opacity: saving ? 0.65 : 1 }}>
+              <Icon name="plus" size={14} /> New workflow
+            </button>
+            <button onClick={onOpenTemplates} type="button" style={ghostBtn}><Icon name="layers" size={14} /> Start from template</button>
             <WorkflowTransfer
               revisionId={editSession.loadedWorkflow?.builtin ? null : editSession.loadedRevisionId}
               handlers={workflowTransfer}
               onImported={onRefreshTemplates}
             />
             <a href="/agents" style={{ ...ghostBtn, textDecoration: 'none' }}><Icon name="code" size={14} /> Agent CLIs</a>
-            <button onClick={onOpenTemplates} style={ghostBtn}><Icon name="layers" size={14} /> Start from template</button>
-            <button onClick={saveWorkflow} disabled={saving} style={{ ...ghostBtn, background: saved ? 'var(--ok)' : 'var(--accent)', color: '#fff', border: 'none', fontWeight: 500, opacity: saving ? 0.65 : 1 }}>
-              <Icon name="check" size={14} /> {saving ? 'Saving…' : saved ? 'Saved to gallery' : 'Save as template'}</button>
+            <button onClick={saveWorkflow} disabled={saving} style={{ ...ghostBtn, background: saved ? 'var(--ok)' : 'var(--surface)',
+              color: saved ? '#fff' : 'var(--text)', border: saved ? 'none' : '1px solid var(--border)', fontWeight: 650, opacity: saving ? 0.65 : 1 }}>
+              <Icon name="check" size={14} /> {saving ? 'Saving…' : saved ? 'Saved' : base.builtin && !serverMode ? 'Save as my workflow' : 'Save changes'}</button>
           </div>
+        </div>
+
+        <div role="note" aria-label="How workflows work" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
+          gap: 1, margin: '14px 0', overflow: 'hidden', border: '1px solid var(--border)', borderRadius: 'var(--r-card)', background: 'var(--border)' }}>
+          <div style={{ padding: '11px 13px', background: 'var(--surface-2)' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)' }}>Each card is one step</div>
+            <div style={{ marginTop: 3, fontSize: 11.5, lineHeight: 1.4, color: 'var(--text-muted)' }}>Keep it small enough for one owner and one reviewable result.</div>
+          </div>
+          {[
+            ['1', 'What happens?', 'Give the role a clear instruction.'],
+            ['2', 'What should it produce?', 'Define the result the next step receives.'],
+            ['3', 'Who is responsible?', 'Assign the right role or person.'],
+          ].map(([number, title, hint]) => <div key={number} style={{ display: 'flex', gap: 8, padding: '11px 12px', background: 'var(--surface)' }}>
+            <span style={{ width: 20, height: 20, flexShrink: 0, display: 'grid', placeItems: 'center', borderRadius: '50%',
+              background: tint('var(--accent)', 13), color: 'var(--accent)', fontSize: 10, fontWeight: 750 }}>{number}</span>
+            <div><div style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text)' }}>{title}</div>
+              <div style={{ marginTop: 2, fontSize: 10.5, lineHeight: 1.35, color: 'var(--text-muted)' }}>{hint}</div></div>
+          </div>)}
         </div>
 
         {saveError && <div role="alert" style={{ marginTop: 10, color: 'var(--bad)', fontSize: 12.5 }}>{saveError}</div>}
@@ -504,10 +586,11 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
               style={{ font: 'inherit', fontSize: 13.5, fontWeight: 600, color: 'var(--text)', background: 'transparent', border: '1px solid transparent',
                 borderRadius: 6, outline: 'none', padding: '2px 6px', margin: '-2px 0', minWidth: 90, maxWidth: 260 }} />
             {base.tag && <span style={{ fontSize: 10.5, color: 'var(--accent)', background: tint('var(--accent)', 12), padding: '1px 7px', borderRadius: 4 }}>{base.tag}</span>}
-            <button onClick={() => setPicker((o) => !o)} title="Switch workflow" style={{ ...ghostBtn, padding: '5px 10px', gap: 5 }}>
-              <Icon name="chevdown" size={12} /> Switch</button>
+            <button onClick={() => setPicker((o) => !o)} type="button" aria-expanded={picker} title="Switch workflow"
+              style={{ ...ghostBtn, padding: '5px 10px', gap: 5 }}>
+              <Icon name="chevdown" size={12} /> Switch workflow</button>
             <span style={{ width: 1, height: 16, background: 'var(--border)' }} />
-            <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>Switch your active workflow, rename it, or save it as your own.</span>
+            <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>This is the active recipe for your next Mission.</span>
             <span style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--run)' }} /> running now at the table</span>
           </div>
@@ -558,6 +641,13 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
                 canLeft={i > 0} canRight={i < stages.length - 1} />
             </React.Fragment>
           ))}
+          <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+            <div style={{ width: 32, height: 2, background: 'var(--border-strong)' }} />
+            <button type="button" onClick={() => addStage(stages.length)} style={{ ...ghostBtn, flexShrink: 0, marginLeft: 8,
+              padding: '8px 12px', color: 'var(--accent)', borderStyle: 'dashed', fontWeight: 700 }}>
+              <Icon name="plus" size={13} /> Add step
+            </button>
+          </div>
         </div>
 
         <WorkflowHistory

@@ -21,6 +21,8 @@ Notable user-visible changes are documented here. This project follows
   runtime, model, duration, token, and cost evidence per task attempt.
 - Safe-checkpoint pause/resume and single-task retry with transitive downstream
   stale-state detection.
+- A first-time-friendly workflow builder with a visible creation action,
+  explicit step instructions, expected results, ownership, and approval rules.
 
 ### Changed
 
