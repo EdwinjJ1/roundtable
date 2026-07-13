@@ -6,9 +6,9 @@
 
 **Turn AI coding sessions into reusable, reviewable workflows.**
 
-Roundtable is the visual workflow and governance layer over local AI agents such
+Roundtable is a visual workflow and governance layer over local AI agents such
 as Claude Code and Codex. Save a successful way of working, run it again, and
-stay in control at planning, permission, review, and delivery gates.
+keep planning, review, artifacts, and delivery in one inspectable history.
 
 [![CI](https://github.com/EdwinjJ1/roundtable/actions/workflows/ci.yml/badge.svg)](https://github.com/EdwinjJ1/roundtable/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -57,7 +57,7 @@ the product:
 - **Pluggable agent runtimes** — deterministic local dispatch for CI, real
   CLIs (Claude Code, Codex, OpenCode), E2B sandboxes, or MiniMax models.
 - **Storage that grows with you** — local JSON for prototypes, normalized
-  Postgres for shared production runs.
+  Postgres for durable single-operator self-hosting and migration testing.
 - **One action layer** — the same business workflows power the Next.js app,
   REST routes, tRPC, and the CLI.
 
@@ -104,13 +104,40 @@ Useful checks:
 
 ```bash
 corepack pnpm typecheck
+corepack pnpm lint
 corepack pnpm test
+corepack pnpm build
 corepack pnpm cli workflow smoke --message "Build a waitlist page"
 ```
 
 > **Zero-key demo:** the default `local-dispatch` adapter is deterministic and
 > needs no API keys — perfect for trying the workbench, CI, and the golden-path
-> demo before wiring up a real agent runtime.
+> demo before wiring up a real agent runtime. Its generated files are
+> deterministic templates; they are not model output or proof that a real
+> runtime integration works.
+
+### Supported development environments
+
+- The current beta supports one trusted operator per deployment. Runtime
+  commands, environment configuration, and defaults are host-scoped rather
+  than tenant-scoped. Do not expose this build as an untrusted multi-user
+  hosted service; login and workflow ownership are not a runtime-isolation
+  boundary.
+- Node.js 20 or newer and pnpm 9 are required; CI verifies Node.js 24 on Ubuntu.
+- Local development is expected to work on Linux and macOS.
+- The current Playwright runner is supported on Linux and macOS only. It relies
+  on POSIX process groups to forward signals and clean up the Next.js process
+  tree. Windows E2E support is not yet implemented.
+- Real-runtime support also depends on the selected CLI version, login, and host
+  platform. Runtime probing reports readiness, but the deterministic CI suite
+  does not certify an installed Claude Code, Codex, or OpenCode CLI.
+
+To run the Chromium golden path on a supported POSIX host:
+
+```bash
+corepack pnpm exec playwright install chromium
+corepack pnpm test:e2e
+```
 
 ## ⚙️ How it works
 
@@ -150,7 +177,7 @@ Swap in a real runtime when you want real work:
 | `ROUNDTABLE_AGENT_ADAPTER` | Behavior | Requires |
 | --- | --- | --- |
 | `local-dispatch` *(default)* | Deterministic template output; used by devrt/CI. | — |
-| `agent-cli` / `claude-cli` / `opencode` | Spawns the selected local CLI runtime (`claude-code`, `codex`, `opencode`, router, or custom command) in the workspace. Runtime status reports command path, detected version, and credential source before execution. | `ROUNDTABLE_ENABLE_EXTERNAL_AGENT=1`; CLI login or API key |
+| `agent-cli` | Spawns the per-agent local runtime (`claude-code`, `claude-code-router`, `codex`, or `opencode`) in the workspace. Runtime status reports command path, detected version, and credential source before execution. | `ROUNDTABLE_ENABLE_EXTERNAL_AGENT=1`; supported CLI installed and logged in, or its documented API key |
 | `e2b` | Runs the agent CLI inside an E2B sandbox. Falls back to `local-dispatch` (logged) if the key is missing. | `E2B_API_KEY` |
 | `minimax` | Runs each agent against the real MiniMax chat model (M3/M2.7). Strips `<think>` reasoning; falls back to `local-dispatch` if the key is missing. | `MINIMAX_API_KEY` |
 
@@ -223,7 +250,29 @@ is set deliberately.
 The safety scan of agent artifacts (secrets + dangerous code) is on by
 default; set `ROUNDTABLE_SAFETY_ENABLED=false` only for testing.
 
+External runtimes are powerful local processes. The artifact scan runs after
+work has occurred and is not a process sandbox. Roundtable does not yet enforce
+one unified read/write/execute/network permission model across every runtime.
+Use a trusted runtime, review its configuration, and prefer an isolated or
+disposable workspace. See [SECURITY.md](SECURITY.md) for current boundaries and
+private vulnerability reporting.
+
 </details>
+
+### Privacy boundary
+
+Roundtable does not currently implement product analytics or automatic
+diagnostic uploads. Local JSON data stays at the configured
+`ROUNDTABLE_DATA_PATH` (default `.roundtable/data.json`); Postgres data goes to
+the database you configure.
+Prompts, repository context, and runtime output may be sent by the runtime or
+model provider you deliberately configure, under that provider's terms.
+
+The framework may have its own telemetry; set `NEXT_TELEMETRY_DISABLED=1` if
+required for your environment. The proposed allowlist for any future Roundtable
+telemetry and the manual diagnostic-export boundary are documented in
+[docs/PRIVACY.md](docs/PRIVACY.md). They are policy and roadmap constraints, not
+a claim that those features already exist.
 
 ## 🗂 Project structure
 
@@ -238,6 +287,15 @@ src/
 ```
 
 **Tech stack:** Next.js 15 · React 18 · tRPC · NextAuth · Postgres · Vitest · pnpm
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Roadmap](ROADMAP.md)
+- [Privacy and diagnostics](docs/PRIVACY.md)
+- [Security policy](SECURITY.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Changelog](CHANGELOG.md)
 
 ## 🤝 Contributing
 

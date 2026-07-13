@@ -134,7 +134,14 @@ export function repairedTargetArtifact(original: Artifact, fixedText: string): A
 // Failed/blocked records whose failure was not repaired by a completed fixer in
 // their producedFor lineage (a completed final-delivery repair clears them all).
 export function unresolvedFailureRecords(records: DispatchRecord[]): DispatchRecord[] {
-  const failed = records.filter((record) => record.status === 'failed' || record.status === 'blocked');
+  const lastCompletedByTask = new Map<string, number>();
+  records.forEach((record, index) => {
+    if (record.status === 'completed') lastCompletedByTask.set(record.taskId, index);
+  });
+  const failed = records.filter((record, index) =>
+    (record.status === 'failed' || record.status === 'blocked')
+    && (lastCompletedByTask.get(record.taskId) ?? -1) < index,
+  );
   const completedFinalRepair = records.some((record) =>
     record.status === 'completed' && record.taskId.startsWith('repair_final_'),
   );

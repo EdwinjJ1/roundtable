@@ -693,6 +693,13 @@ function App() {
   const deleteWorkflowTemplate = trpc.missions.deleteTemplate.useMutation({
     onSuccess: () => trpcUtils.missions.templates.invalidate(),
   });
+  const previewWorkflowImport = trpc.missions.previewImport.useMutation();
+  const importWorkflowDocument = trpc.missions.importDocument.useMutation({
+    onSuccess: () => trpcUtils.missions.templates.invalidate(),
+  });
+  const pauseExecution = trpc.execution.pause.useMutation();
+  const resumeExecution = trpc.execution.resume.useMutation();
+  const retryExecutionTask = trpc.execution.retryTask.useMutation();
   const deleteChat = trpc.chats.delete.useMutation({
     onSuccess: () => {
       trpcUtils.chats.list.invalidate();
@@ -1450,6 +1457,18 @@ function App() {
             serverTemplates={authed ? workflowTemplatesQ.data : null}
             onSaveTemplate={(payload) => saveWorkflowTemplate.mutateAsync(payload)}
             onRefreshTemplates={() => trpcUtils.missions.templates.invalidate()}
+            workflowTransfer={authed ? {
+              exportRevision: (input) => trpcUtils.missions.exportRevision.fetch(input),
+              previewImport: (input) => previewWorkflowImport.mutateAsync(input),
+              importDocument: (input) => importWorkflowDocument.mutateAsync(input),
+            } : null}
+            workflowHistory={authed ? {
+              revisions: (input) => trpcUtils.missions.revisions.fetch(input),
+              runs: (input) => trpcUtils.missions.runs.fetch(input),
+              pause: (input) => pauseExecution.mutateAsync(input),
+              resume: (input) => resumeExecution.mutateAsync(input),
+              retryTask: (input) => retryExecutionTask.mutateAsync(input),
+            } : null}
             onDeleteTemplate={(id) => deleteWorkflowTemplate.mutate({ id })} />}
         </div>
       </div>

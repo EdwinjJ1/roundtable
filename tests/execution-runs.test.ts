@@ -6,6 +6,7 @@ import {
   createExecutionRun,
   finishTaskAttempt,
   getExecutionRun,
+  listExecutionRuns,
   startTaskAttempt,
 } from '../src/server/actions/execution-actions.js';
 import { approveTurn, createTurn } from '../src/server/actions/turn-actions.js';
@@ -104,5 +105,49 @@ describe('execution run history', () => {
 
     await expect(finishTaskAttempt(alice, { attemptId: attempt.id, status: 'failed' }))
       .rejects.toMatchObject({ message: 'task_attempt_invalid_transition', status: 409 });
+  });
+
+  it('stores provider-reported runtime evidence on the attempt that produced it', async () => {
+    const turn = await createTurn({ actor: alice, message: 'Build a React profile page.' });
+    const run = await createExecutionRun(alice, { missionId: turn.missionId, turnId: turn.id });
+    const attempt = await startTaskAttempt(alice, {
+      executionRunId: run.id,
+      taskId: turn.plan.tasks[0]!.id,
+    });
+
+    await finishTaskAttempt(alice, {
+      attemptId: attempt.id,
+      status: 'completed',
+      evidence: {
+        runtime: 'openai-compat',
+        model: 'provider/model-v1',
+        usage: { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 },
+      },
+    });
+
+    expect((await getExecutionRun(alice, run.id))?.attempts[0]).toMatchObject({
+      runtime: 'openai-compat',
+      model: 'provider/model-v1',
+      tokens: { status: 'available', source: 'provider_reported', input: 120, output: 30, total: 150 },
+      cost: { status: 'unavailable', reason: 'provider_did_not_report_cost' },
+      durationMs: expect.any(Number),
+    });
+  });
+
+  it('lists a workflow run with its attempts for the authenticated history view', async () => {
+    const turn = await createTurn({ actor: alice, message: 'Build a React profile page.' });
+    const run = await createExecutionRun(alice, { missionId: turn.missionId, turnId: turn.id });
+    await startTaskAttempt(alice, {
+      executionRunId: run.id,
+      taskId: turn.plan.tasks[0]!.id,
+      runtime: 'local-dispatch',
+    });
+
+    const history = await listExecutionRuns(alice, { workflowId: run.workflowId });
+
+    expect(history).toHaveLength(1);
+    expect(history[0]?.run.id).toBe(run.id);
+    expect(history[0]?.attempts).toHaveLength(1);
+    expect(await listExecutionRuns(bob, { workflowId: run.workflowId })).toEqual([]);
   });
 });

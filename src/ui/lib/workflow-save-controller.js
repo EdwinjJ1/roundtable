@@ -1,4 +1,85 @@
-export const WORKFLOW_CONFLICT_MESSAGE = 'This workflow changed elsewhere. Latest version loaded; your edits are still here.';
+export const WORKFLOW_CONFLICT_MESSAGE = 'A newer workflow revision exists. Your edits are still here; load the latest revision before saving again.';
+
+/**
+ * Pin an editor to the exact immutable revision it loaded. Query refetches may
+ * reveal a newer remote revision, but they never advance this session's CAS or
+ * export target until the user explicitly loads it.
+ * @param {*} workflow
+ * @param {((state: ReturnType<typeof workflowEditSessionSnapshot>) => void)=} onChange
+ */
+export function createWorkflowEditSession(workflow, onChange = () => {}) {
+  let state = workflowEditSessionSnapshot(workflow);
+  const publish = (next) => {
+    state = next;
+    onChange(state);
+    return state;
+  };
+  const load = (nextWorkflow) => publish(workflowEditSessionSnapshot(nextWorkflow));
+  const markDirty = () => state.dirty ? state : publish({ ...state, dirty: true });
+  const observeRemote = (remoteWorkflow) => {
+    if (!remoteWorkflow || remoteWorkflow.id !== state.workflowId) return state;
+    const remote = revisionIdentity(remoteWorkflow);
+    const changed = remote.expectedRevision > state.expectedRevision
+      || (remote.expectedRevision === state.expectedRevision && remote.loadedRevisionId !== state.loadedRevisionId);
+    if (
+      changed === state.remoteChanged
+      && remote.expectedRevision === state.remoteExpectedRevision
+      && remote.loadedRevisionId === state.remoteRevisionId
+    ) return state;
+    return publish({
+      ...state,
+      remoteChanged: changed,
+      remoteExpectedRevision: changed ? remote.expectedRevision : null,
+      remoteRevisionId: changed ? remote.loadedRevisionId : null,
+      remoteWorkflow: changed ? cloneWorkflow(remoteWorkflow) : null,
+    });
+  };
+  const commitSaved = (result) => {
+    const revision = result?.revision;
+    if (!revision?.id || !Number.isInteger(revision.revision)) return state;
+    const loadedWorkflow = {
+      ...cloneWorkflow(revision.template ?? state.loadedWorkflow),
+      expectedRevision: revision.revision,
+      workflowRevisionId: revision.id,
+    };
+    return load(loadedWorkflow);
+  };
+  return {
+    get state() { return state; },
+    load,
+    markDirty,
+    observeRemote,
+    commitSaved,
+  };
+}
+
+/** @param {*} workflow */
+export function workflowEditSessionSnapshot(workflow) {
+  const identity = revisionIdentity(workflow);
+  return {
+    workflowId: workflow?.id ?? null,
+    loadedWorkflow: cloneWorkflow(workflow),
+    loadedRevisionId: identity.loadedRevisionId,
+    expectedRevision: identity.expectedRevision,
+    dirty: false,
+    remoteChanged: false,
+    remoteExpectedRevision: null,
+    remoteRevisionId: null,
+    remoteWorkflow: null,
+  };
+}
+
+function revisionIdentity(workflow) {
+  return {
+    loadedRevisionId: typeof workflow?.workflowRevisionId === 'string' ? workflow.workflowRevisionId : null,
+    expectedRevision: Number.isInteger(workflow?.expectedRevision) ? workflow.expectedRevision : 0,
+  };
+}
+
+function cloneWorkflow(workflow) {
+  if (workflow == null) return workflow;
+  return JSON.parse(JSON.stringify(workflow));
+}
 
 /**
  * @typedef {Object} WorkflowSaveArgs

@@ -5,6 +5,7 @@ import type {
   Artifact,
   DispatchRecord,
   PlanTask,
+  TaskAttempt,
   WorkflowRun,
 } from '../../types.js';
 import { E2BUnavailableError } from '../adapters/e2b-adapter.js';
@@ -13,11 +14,15 @@ import { OpenAICompatUnavailableError } from '../adapters/openai-compat-adapter.
 import { normalizeAdapter, runAgentTask } from '../agent-runner.js';
 import {
   createExecutionRun,
+  ExecutionActionError,
+  executionRunPauseRequested,
   executionRunIsActive,
   finishExecutionRun,
   finishTaskAttempt,
+  getExecutionRun,
   interruptExecutionRun,
-  startTaskAttempt,
+  markExecutionRunPaused,
+  startTaskAttemptWave,
 } from '../execution-actions.js';
 import {
   buildHandoffCardV2,
@@ -64,6 +69,7 @@ export type DispatchInput = {
   turnId: string;
   agentAdapter?: string | undefined;
   actor?: Actor | null | undefined;
+  executionRunId?: string | undefined;
 };
 
 export async function approveTurn(input: ApprovalInput): Promise<DispatchResponse> {
@@ -145,7 +151,7 @@ export async function approveTurn(input: ApprovalInput): Promise<DispatchRespons
 export async function dispatchTurn(input: DispatchInput): Promise<DispatchResponse> {
   const turn = await getTurn(input.turnId, input);
   if (!turn) throw new ActionError('turn_not_found', 404);
-  if (turn.dispatchStatus === 'completed' && turn.dispatch.length > 0) return dispatchResponse(turn);
+  if (!input.executionRunId && turn.dispatchStatus === 'completed' && turn.dispatch.length > 0) return dispatchResponse(turn);
 
   const adapter = normalizeAdapter(
     publicAiExecutionDisabled()
@@ -154,9 +160,36 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   );
   const runtimeEnv = { ...process.env };
   const workspace = await prepareWorkspace(turn);
-  const executionRun = input.actor
-    ? await createExecutionRun(input.actor, { missionId: turn.missionId, turnId: turn.id })
+  const existingProjection = input.actor && input.executionRunId
+    ? await getExecutionRun(input.actor, input.executionRunId)
     : null;
+  if (input.executionRunId && (!existingProjection || existingProjection.run.turnId !== turn.id || existingProjection.run.status !== 'resuming')) {
+    throw new ActionError('execution_run_invalid_state', 409);
+  }
+  const executionRun = existingProjection?.run
+    ?? (input.actor ? await createExecutionRun(input.actor, { missionId: turn.missionId, turnId: turn.id }) : null);
+  const latestAttemptByTask = new Map<string, TaskAttempt>();
+  for (const attempt of existingProjection?.attempts ?? []) {
+    const current = latestAttemptByTask.get(attempt.taskId);
+    if (!current || attempt.attempt > current.attempt) latestAttemptByTask.set(attempt.taskId, attempt);
+  }
+  const initialCompletedTaskIds = executionRun
+    ? executionRun.taskSnapshots
+        .filter((task) => latestAttemptByTask.get(task.id)?.status === 'completed')
+        .filter((task) => !executionRun.staleTaskIds.includes(task.id))
+        .map((task) => task.id)
+    : [];
+  const initialCompletedTaskOutputs = Object.fromEntries(
+    initialCompletedTaskIds.flatMap((taskId) => {
+      const attempt = latestAttemptByTask.get(taskId);
+      if (!attempt?.outputSummary) return [];
+      return [[taskId, {
+        summary: attempt.outputSummary,
+        ...(attempt.artifactRefs[0] ? { artifactId: attempt.artifactRefs[0] } : {}),
+      }]];
+    }),
+  );
+  const schedulerTasks = executionRun?.taskSnapshots ?? turn.plan.tasks;
   await updateTurn(turn.id, (current) => ({
     ...current,
     dispatchStatus: 'running',
@@ -175,6 +208,12 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   const eventsByTask = new Map<string, AgentEvent[]>();
   const artifactByTask = new Map<string, Artifact>();
   const allArtifactsByTask = new Map<string, Artifact[]>();
+  const outputByTask = new Map<string, { summary: string; artifactId?: string | undefined }>();
+  const evidenceByTask = new Map<string, {
+    runtime?: string | undefined;
+    model?: string | null | undefined;
+    usage?: Record<string, unknown> | undefined;
+  }>();
 
   // Work completed by EARLIER turns in this chat: handed to every agent so a
   // follow-up request is treated as an increment on the existing work, not a
@@ -281,6 +320,11 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     }
 
     eventsByTask.set(task.id, fallbackNote ? [fallbackNote, ...result.events] : result.events);
+    evidenceByTask.set(task.id, {
+      ...(result.runtime !== undefined ? { runtime: result.runtime } : {}),
+      ...(result.model !== undefined ? { model: result.model } : {}),
+      ...(result.usage !== undefined ? { usage: result.usage } : {}),
+    });
     const produced = artifactsFromRun(turn, effectiveTask, result);
     artifactByTask.set(task.id, produced.primary);
     allArtifactsByTask.set(task.id, produced.all);
@@ -343,7 +387,9 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
       }
     }
 
-    return { ok: true, output: { summary: result.text, artifactId: artifactByTask.get(task.id)?.id } };
+    const output = { summary: result.text, artifactId: artifactByTask.get(task.id)?.id };
+    outputByTask.set(task.id, output);
+    return { ok: true, output };
   };
 
   // Fixer tasks the scheduler derives at runtime, keyed by id, so onTaskState can
@@ -361,19 +407,17 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     const latestBeforeProgress = await getTurn(turn.id, input);
     if (!latestBeforeProgress || latestBeforeProgress.dispatchStage === 'interrupted') return;
     const derived = derivedById.get(taskId);
-    if (executionRun && input.actor && status === 'running') {
-      const taskSnapshot = derived ?? turn.plan.tasks.find((task) => task.id === taskId);
-      const attempt = await startTaskAttempt(input.actor, {
-        executionRunId: executionRun.id,
-        taskId,
-        ...(taskSnapshot ? { taskSnapshot } : {}),
-        expectedGeneration: executionRun.generation,
-      });
-      attemptIdByTask.set(taskId, attempt.id);
-    } else if (executionRun && input.actor && (status === 'completed' || status === 'failed')) {
+    if (executionRun && input.actor && (status === 'completed' || status === 'failed')) {
       const attemptId = attemptIdByTask.get(taskId);
       if (!attemptId) throw new ActionError('task_attempt_not_started', 409);
-      await finishTaskAttempt(input.actor, { attemptId, status, expectedGeneration: executionRun.generation });
+      await finishTaskAttempt(input.actor, {
+        attemptId,
+        status,
+        expectedGeneration: executionRun.generation,
+        evidence: evidenceByTask.get(taskId),
+        outputSummary: outputByTask.get(taskId)?.summary ?? null,
+        artifactRefs: (allArtifactsByTask.get(taskId) ?? []).map((artifact) => artifact.id),
+      });
     }
     // Persist this task's artifacts as soon as it reaches a terminal state — not
     // only at the end-of-run fold. An interrupted or crashed run must not lose
@@ -426,41 +470,72 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     }
   };
 
-  const run = await runScheduler({
-    tasks: turn.plan.tasks,
-    runTask,
-    maxFixRounds: maxFixRounds(),
-    now: nowIso,
-    onFailure: (failed, error) => {
-      if (!shouldAttemptFix(error)) return null;
-      const fixer = makeFixerTask(failed, error);
-      // Point the fixer at the concrete deliverable it repairs (the previewable
-      // artifact among the failed task and its upstream deps — for a failed
-      // review that's the implementer's page). The fixer then writes its
-      // corrected output to the SAME path and the artifact is updated in place,
-      // so the fix actually lands in what the user previews.
-      const repairTarget = [failed.id, ...failed.deps]
-        .map((taskId) => ({ taskId, artifact: artifactByTask.get(taskId) }))
-        .find((entry) => entry.artifact?.kind === 'preview');
-      const enriched: PlanTask = repairTarget?.artifact
-        ? {
-            ...fixer,
-            producedFor: failed.id,
-            repairTargetPath: repairTarget.artifact.title,
-            repairTargetTaskId: repairTarget.taskId,
+  let run: Awaited<ReturnType<typeof runScheduler>>;
+  try {
+    run = await runScheduler({
+      tasks: schedulerTasks,
+      initialCompletedTaskIds,
+      initialCompletedTaskOutputs,
+      onWaveStart: executionRun && input.actor
+        ? async (tasks) => {
+            const attempts = await startTaskAttemptWave(input.actor!, {
+              executionRunId: executionRun.id,
+              tasks,
+              expectedGeneration: executionRun.generation,
+            });
+            if (!attempts) return false;
+            for (const attempt of attempts) attemptIdByTask.set(attempt.taskId, attempt.id);
+            return true;
           }
-        : { ...fixer, producedFor: failed.id };
-      // Remember it so onTaskState can add it to the persisted plan when it runs
-      // (a concurrent write here would race the store's read-modify-write).
-      derivedById.set(enriched.id, enriched);
-      return enriched;
-    },
-    onTaskState,
-  });
+        : undefined,
+      shouldPause: executionRun && input.actor
+        ? () => executionRunPauseRequested(input.actor!, executionRun.id, executionRun.generation)
+        : undefined,
+      runTask,
+      maxFixRounds: maxFixRounds(),
+      now: nowIso,
+      onFailure: (failed, error) => {
+        if (!shouldAttemptFix(error)) return null;
+        const fixer = makeFixerTask(failed, error);
+        // Point the fixer at the concrete deliverable it repairs (the previewable
+        // artifact among the failed task and its upstream deps — for a failed
+        // review that's the implementer's page). The fixer then writes its
+        // corrected output to the SAME path and the artifact is updated in place,
+        // so the fix actually lands in what the user previews.
+        const repairTarget = [failed.id, ...failed.deps]
+          .map((taskId) => ({ taskId, artifact: artifactByTask.get(taskId) }))
+          .find((entry) => entry.artifact?.kind === 'preview');
+        const enriched: PlanTask = repairTarget?.artifact
+          ? {
+              ...fixer,
+              producedFor: failed.id,
+              repairTargetPath: repairTarget.artifact.title,
+              repairTargetTaskId: repairTarget.taskId,
+            }
+          : { ...fixer, producedFor: failed.id };
+        // Remember it so onTaskState can add it to the persisted plan when it runs
+        // (a concurrent write here would race the store's read-modify-write).
+        derivedById.set(enriched.id, enriched);
+        return enriched;
+      },
+      onTaskState,
+    });
+  } catch (error) {
+    if (
+      executionRun
+      && input.actor
+      && error instanceof ExecutionActionError
+      && error.message === 'execution_run_fenced'
+    ) {
+      await finishExecutionRun(input.actor, executionRun.id, 'cancelled', executionRun.generation);
+      return dispatchResponse(requireTurn(await getTurn(turn.id, input)));
+    }
+    throw error;
+  }
 
   // Assemble DispatchRecords from scheduler records, enriching with the captured
   // agent events. Blocked tasks carry no events.
-  const records: DispatchRecord[] = run.records.map((record) => ({
+  const newRecords: DispatchRecord[] = run.records.map((record) => ({
     taskId: record.taskId,
     agentId: record.agentId,
     status: record.status,
@@ -472,6 +547,21 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     ...(record.fixRound !== undefined ? { fixRound: record.fixRound } : {}),
     artifactIds: (allArtifactsByTask.get(record.taskId) ?? []).map((artifact) => artifact.id),
   }));
+  const records: DispatchRecord[] = [...turn.dispatch, ...newRecords];
+
+  if (run.paused && executionRun && input.actor) {
+    const pausedTurn = requireTurn(await updateTurn(turn.id, (current) => ({
+      ...current,
+      dispatchStatus: 'running',
+      dispatchStage: 'paused',
+      dispatchError: null,
+      dispatch: records,
+    }), input));
+    // Publish `paused` last: observers may treat that status as a quiescence
+    // barrier and immediately snapshot or remove the workspace.
+    await markExecutionRunPaused(input.actor, executionRun.id, executionRun.generation);
+    return dispatchResponse(pausedTurn);
+  }
 
   // Fold every task's artifacts together with replace-by-identity semantics:
   // two tasks (or a fixer round) touching the same file yield ONE artifact with
@@ -523,9 +613,13 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   // A question turn delivers an answer, not a build: delivery-report artifacts
   // (review summary, final report) would be noise on top of it.
   const isQuestionTurn = turn.intake.intentType === 'question';
-  const artifacts: Artifact[] = failed || isQuestionTurn
-    ? runArtifacts
-    : [...runArtifacts, reviewerSummaryArtifact(turn, runArtifacts, records), finalReportArtifact(turn, runArtifacts, records)];
+  const artifacts: Artifact[] = [...runArtifacts];
+  if (!failed && !isQuestionTurn) {
+    upsertArtifacts(artifacts, [
+      reviewerSummaryArtifact(turn, runArtifacts, records),
+      finalReportArtifact(turn, runArtifacts, records),
+    ]);
+  }
   // Persist any fixer tasks the scheduler derived at runtime back into the plan,
   // so the UI (roundtable + todo list, which read plan.tasks) shows the fix pass
   // — front and back stay in sync on the real executed graph.
@@ -590,7 +684,12 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   if (finalChatId) {
     await mutateData((data) => {
       upsertArtifacts(data.artifacts, finalTurn.artifacts);
-      data.handoffs.push(...handoffsForTasks(finalTurn, finalChatId));
+      const generated = handoffsForTasks(finalTurn, finalChatId);
+      const generatedCardIds = new Set(generated.map((handoff) => handoff.card.id));
+      data.handoffs = data.handoffs.filter((handoff) =>
+        handoff.chatId !== finalChatId || !generatedCardIds.has(handoff.card.id),
+      );
+      data.handoffs.push(...generated);
     });
   }
   return dispatchResponse(finalTurn);

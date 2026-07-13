@@ -1,0 +1,63 @@
+name: Feature request
+description: Describe a workflow or governance problem Roundtable should solve
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the user's problem and evidence. A proposed implementation is useful after the need is clear.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Who encounters this problem, in what workflow, and what do they do today?
+      placeholder: When I manage several local coding agents…
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable success without prescribing internal architecture.
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Concrete example
+      description: Give a redacted input/output or workflow example. Do not include proprietary prompts or source.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current workaround or alternatives
+      description: What have you tried, and why is it insufficient?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Product area
+      options:
+        - Workflows and revisions
+        - Planning and approval
+        - Scheduling and execution
+        - Runtime integration
+        - Artifacts and review
+        - Permissions and safety
+        - Storage and migration
+        - UI and accessibility
+        - Contributor experience
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I checked ROADMAP.md and existing issues for related work.
+          required: true
+        - label: This request concerns file-, script-, or command-centered workflows rather than general SaaS automation.
+          required: false

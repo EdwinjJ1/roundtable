@@ -30,6 +30,7 @@ import {
 } from './runtime-actions.js';
 import { applyDocPolicy, quarantineDocs } from './turns/doc-policy.js';
 import { collectChangedWorkspaceFiles, type ChangedWorkspaceFile } from './turns/workspace-scan.js';
+import { mergeProviderUsage } from './usage-evidence.js';
 
 export type AgentRunResult = {
   text: string;
@@ -38,6 +39,9 @@ export type AgentRunResult = {
   events: AgentEvent[];
   ok: boolean;
   error: string | null;
+  runtime?: string | undefined;
+  model?: string | null | undefined;
+  usage?: Record<string, unknown> | undefined;
   // Real files the agent produced or edited in the workspace during this run
   // (CLI-backed agents only). These are the deliverables; `text` is the
   // agent's narration and must never be presented as the product.
@@ -117,6 +121,7 @@ async function runLocalTask(input: {
     kind: kindForPath(path),
     ok: true,
     error: null,
+    runtime: 'local-dispatch',
     events: [
       { type: 'thinking_delta', delta: `${role} received the handoff and prepared ${path}.` },
       { type: 'tool_use', id: toolId, name: 'write_artifact', input: { path, role, agentId: agent.id } },
@@ -244,6 +249,8 @@ async function runAgentCliTask(input: {
       kind: 'markdown',
       ok,
       error: result.error,
+      runtime,
+      model: config?.model ?? null,
       files: policy.kept,
       events: [
         ...started,
@@ -302,6 +309,8 @@ async function runAgentCliTask(input: {
       kind: kindForPath(path),
       ok: false,
       error: message,
+      runtime,
+      model: config?.model ?? null,
       events: [
         ...started,
         { type: 'tool_result', id: toolId, output: { error: message }, isError: true },
@@ -343,6 +352,7 @@ async function runE2BTask(input: {
     kind: kindForPath(path),
     ok,
     error: ok ? null : `e2b_exit_${run.exitCode}`,
+    runtime: 'e2b',
     events: [
       ...started,
       { type: 'tool_result', id: toolId, output: { exitCode: run.exitCode }, ...(ok ? {} : { isError: true }) },
@@ -377,7 +387,7 @@ async function runChatModelTask(
     message: string;
     handoffContext?: string | undefined;
   },
-  provider: { name: string; toolName: string; model: string; run: ChatModelRun; isUnavailable: (error: unknown) => boolean },
+  provider: { name: string; runtime: string; toolName: string; model: string; run: ChatModelRun; isUnavailable: (error: unknown) => boolean },
 ): Promise<AgentRunResult> {
   const agent = agentForTask(input.task);
   const path = pathForTask(input.task);
@@ -398,6 +408,7 @@ async function runChatModelTask(
     { type: 'thinking_delta', delta: `${agent.displayName} querying ${provider.model}.` },
     { type: 'tool_use', id: toolId, name: provider.toolName, input: { agentId: agent.id, role: agent.role, path } },
   ];
+  const usageRounds: Array<Record<string, unknown> | undefined> = [];
 
   const failure = async (message: string, rawResponse?: string): Promise<AgentRunResult> => {
     const text = [
@@ -415,6 +426,9 @@ async function runChatModelTask(
       kind: kindForPath(path),
       ok: false,
       error: message,
+      runtime: provider.runtime,
+      model: provider.model,
+      usage: mergeProviderUsage(usageRounds),
       events: [
         ...started,
         { type: 'tool_result', id: toolId, output: { error: message }, isError: true },
@@ -442,6 +456,7 @@ async function runChatModelTask(
         timeoutMs: timeoutMs(),
         maxTokens: modelMaxTokens(),
       });
+      usageRounds.push(run.usage);
       combined += run.text;
       if (run.finishReason !== 'length') break;
       messages = [
@@ -488,6 +503,9 @@ async function runChatModelTask(
       kind: kindForPath(path),
       ok: true,
       error: null,
+      runtime: provider.runtime,
+      model: provider.model,
+      usage: mergeProviderUsage(usageRounds),
       events: [
         ...started,
         { type: 'tool_result', id: toolId, output: { model: provider.model, reasoningTokens: reasoningTokens ?? 0, chars: text.length } },
@@ -520,6 +538,7 @@ async function runMiniMaxTask(input: {
   const model = await resolvedMiniMaxModel();
   return runChatModelTask(input, {
     name: 'MiniMax',
+    runtime: 'minimax',
     toolName: 'minimax_chat',
     model,
     run: runOnMiniMax,
@@ -539,6 +558,7 @@ async function runOpenAICompatTask(input: {
   const model = await resolvedOpenAICompatModel();
   return runChatModelTask(input, {
     name: model,
+    runtime: 'openai-compat',
     toolName: 'model_chat',
     model,
     run: runOnOpenAICompat,

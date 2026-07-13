@@ -1,3 +1,5 @@
+import type { WorkflowCompatibilityRequirements } from './workflow-compatibility.js';
+
 export type Actor = {
   id: string;
   email: string;
@@ -150,6 +152,8 @@ export type WorkflowRevision = {
   ownerId: string;
   revision: number;
   contentHash: string;
+  documentHash: string | null;
+  compatibility: WorkflowCompatibilityRequirements | null;
   template: WorkflowTemplate;
   createdAt: string;
 };
@@ -181,6 +185,9 @@ export type ExecutionRun = {
   workflowSnapshot: WorkflowTemplate;
   planSnapshot: Plan;
   taskSnapshots: PlanTask[];
+  // Tasks whose previously completed output is no longer valid after a retry.
+  // Includes the retried task and all of its transitive dependents.
+  staleTaskIds: string[];
   status: ExecutionRunStatus;
   generation: number;
   createdAt: string;
@@ -194,6 +201,27 @@ export type ExecutionRun = {
 
 export type TaskAttemptStatus = 'created' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
+export type TokenEvidence =
+  | {
+      status: 'available';
+      source: 'provider_reported';
+      completeness: 'complete' | 'partial';
+      input: number | null;
+      output: number | null;
+      total: number;
+    }
+  | { status: 'unavailable'; reason: 'provider_did_not_report_tokens' };
+
+export type CostEvidence =
+  | {
+      status: 'available';
+      source: 'provider_reported';
+      completeness: 'complete' | 'partial';
+      amount: number;
+      currency: string;
+    }
+  | { status: 'unavailable'; reason: 'provider_did_not_report_cost' };
+
 export type TaskAttempt = {
   id: string;
   ownerId: string;
@@ -201,7 +229,13 @@ export type TaskAttempt = {
   taskId: string;
   attempt: number;
   status: TaskAttemptStatus;
-  runtime: AgentRuntimeKind | null;
+  runtime: string | null;
+  model: string | null;
+  tokens: TokenEvidence;
+  cost: CostEvidence;
+  durationMs: number | null;
+  outputSummary: string | null;
+  artifactRefs: string[];
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;

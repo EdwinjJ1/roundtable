@@ -1,0 +1,39 @@
+name: Setup or usage question
+description: Ask for help using or contributing to Roundtable
+title: "[Question]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Questions are public. Do not include credentials, private source, prompts, local paths, raw logs, or vulnerability details.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: Describe the intended workflow or contribution.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Include relevant documentation and sanitized commands or error codes.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Roundtable version/commit, OS, Node version, store driver, and runtime kind when relevant.
+      placeholder: main@abc1234, Ubuntu 24.04, Node 24, local JSON, local-dispatch
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed secrets, private source, prompts, personal paths, raw logs, and security-sensitive details.
+          required: true

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  createWorkflowEditSession,
   createServerWorkflowDraft,
   createWorkflowSaveController,
 } from '../src/ui/lib/workflow-save-controller.js';
@@ -62,7 +63,7 @@ describe('workflow save controller', () => {
 
     expect(result).toEqual({ ok: false, code: 'CONFLICT' });
     expect(onConflict).toHaveBeenCalledOnce();
-    expect(onError).toHaveBeenCalledWith('This workflow changed elsewhere. Latest version loaded; your edits are still here.');
+    expect(onError).toHaveBeenCalledWith('A newer workflow revision exists. Your edits are still here; load the latest revision before saving again.');
     expect(onSaved).not.toHaveBeenCalled();
     expect(localDraft).toEqual({ name: 'Unsaved local edit' });
   });
@@ -78,6 +79,43 @@ describe('workflow save controller', () => {
 
     expect(failed).toEqual({ ok: false, code: 'ERROR' });
     expect(retried).toMatchObject({ ok: true });
+  });
+
+  it('pins CAS and export identity while a background refetch reports a newer revision', () => {
+    const loaded = {
+      id: 'wf-custom', name: 'Local edit', expectedRevision: 2, workflowRevisionId: 'revision-2', stages: [],
+    };
+    const controller = createWorkflowEditSession(loaded);
+    controller.markDirty();
+    controller.observeRemote({ ...loaded, expectedRevision: 3, workflowRevisionId: 'revision-3' });
+
+    expect(controller.state).toMatchObject({
+      expectedRevision: 2,
+      loadedRevisionId: 'revision-2',
+      dirty: true,
+      remoteChanged: true,
+      remoteExpectedRevision: 3,
+      remoteRevisionId: 'revision-3',
+    });
+    expect(controller.state.loadedWorkflow.name).toBe('Local edit');
+  });
+
+  it('advances the pinned edit session only after a successful save or explicit load', () => {
+    const controller = createWorkflowEditSession({
+      id: 'wf-custom', name: 'Draft', expectedRevision: 2, workflowRevisionId: 'revision-2', stages: [],
+    });
+    controller.markDirty();
+    controller.commitSaved({
+      revision: { id: 'revision-3', revision: 3, template: { id: 'wf-custom', name: 'Saved', stages: [] } },
+    });
+
+    expect(controller.state).toMatchObject({
+      expectedRevision: 3,
+      loadedRevisionId: 'revision-3',
+      dirty: false,
+      remoteChanged: false,
+    });
+    expect(controller.state.loadedWorkflow.name).toBe('Saved');
   });
 
   it('creates a server-mode workflow draft that the real save action accepts', async () => {

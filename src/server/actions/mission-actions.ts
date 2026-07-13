@@ -25,6 +25,7 @@ import type {
   OwnedWorkflow,
   AgentRole,
 } from '../types.js';
+import type { WorkflowCompatibilityRequirements } from '../workflow-compatibility.js';
 import { AGENT_ROSTER, agentCardFor, agentForTask } from './agent-roster.js';
 
 const seat = (role: AgentRole, agentId?: string) => ({
@@ -308,17 +309,21 @@ export async function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
   return [...overridden, ...extra].map(cloneTemplate);
 }
 
-export type EditableWorkflowTemplate = WorkflowTemplate & { expectedRevision: number };
+export type EditableWorkflowTemplate = WorkflowTemplate & {
+  expectedRevision: number;
+  workflowRevisionId: string | null;
+};
 
 export async function listWorkflowTemplatesForActor(actor: Actor): Promise<EditableWorkflowTemplate[]> {
   const owned = await listOwnedWorkflows(actor);
   const custom = owned.map(({ workflow, latestRevision }) => ({
     ...cloneTemplate(latestRevision.template),
     expectedRevision: workflow.latestRevision,
+    workflowRevisionId: latestRevision.id,
   }));
   const overridden = BUILTIN_WORKFLOW_TEMPLATES.map((builtin) =>
     custom.find((template) => template.id === builtin.id)
-      ?? { ...cloneTemplate(builtin), expectedRevision: 0 },
+      ?? { ...cloneTemplate(builtin), expectedRevision: 0, workflowRevisionId: null },
   );
   return [
     ...overridden,
@@ -410,6 +415,8 @@ export class WorkflowTemplateError extends Error {
 export type SaveWorkflowRevisionInput = {
   template: WorkflowTemplate;
   expectedRevision: number;
+  documentHash?: string | null | undefined;
+  compatibility?: WorkflowCompatibilityRequirements | null | undefined;
 };
 
 export type SaveWorkflowRevisionResult = {
@@ -445,6 +452,8 @@ export async function saveWorkflowRevision(
       ownerId: actor.id,
       revision: revisionNumber,
       contentHash: workflowExecutableContentHash(template),
+      documentHash: input.documentHash ?? null,
+      compatibility: input.compatibility ? structuredClone(input.compatibility) : null,
       template,
       createdAt: now,
     };
@@ -493,6 +502,13 @@ export async function getWorkflowRevision(actor: Actor, revisionId: string): Pro
   return data.workflowRevisions.find((revision) => revision.ownerId === actor.id && revision.id === revisionId) ?? null;
 }
 
+export async function listWorkflowRevisions(actor: Actor, workflowId: string): Promise<WorkflowRevision[]> {
+  const data = await readData();
+  return data.workflowRevisions
+    .filter((revision) => revision.ownerId === actor.id && revision.workflowId === workflowId)
+    .sort((left, right) => right.revision - left.revision);
+}
+
 export function workflowExecutableContentHash(template: WorkflowTemplate): string {
   const spec = { planning: template.planning, stages: template.stages };
   return createHash('sha256').update(stableJson(spec)).digest('hex');
@@ -507,7 +523,7 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 
-function validateWorkflowTemplate(template: WorkflowTemplate): void {
+export function validateWorkflowTemplate(template: WorkflowTemplate): void {
   const idValue = (template.id ?? '').trim();
   if (!idValue) throw new WorkflowTemplateError('missing_template_id');
   if (!(template.name ?? '').trim()) throw new WorkflowTemplateError('missing_template_name');
