@@ -1448,7 +1448,8 @@ function App() {
           )}
           {view === 'workflow' && <WorkflowView agents={agents} onAddAgent={() => setModal('agent')} onOpenTemplates={() => setModal('table')}
             serverTemplates={authed ? workflowTemplatesQ.data : null}
-            onSaveTemplate={(template) => saveWorkflowTemplate.mutate(template)}
+            onSaveTemplate={(payload) => saveWorkflowTemplate.mutateAsync(payload)}
+            onRefreshTemplates={() => trpcUtils.missions.templates.invalidate()}
             onDeleteTemplate={(id) => deleteWorkflowTemplate.mutate({ id })} />}
         </div>
       </div>

@@ -13,6 +13,7 @@ export function handoffForTurn(actor: Actor | null | undefined, chatId: string, 
     plan: turn.plan,
     needsClarification: turn.needsClarification,
     workflowTemplateId: turn.workflowTemplateId,
+    workflowRevisionId: turn.workflowRevisionId ?? null,
   });
   const firstTask = turn.plan.tasks[0];
   const v2 = firstTask
@@ -66,6 +67,7 @@ export function handoffsForTasks(turn: LocalTurn, chatId: string): Handoff[] {
     plan: turn.plan,
     needsClarification: turn.needsClarification,
     workflowTemplateId: turn.workflowTemplateId,
+    workflowRevisionId: turn.workflowRevisionId ?? null,
   });
   return turn.plan.tasks.map((task) => {
     const taskArtifacts = turn.artifacts.filter((artifact) => artifact.id.startsWith(`${task.id}_`));

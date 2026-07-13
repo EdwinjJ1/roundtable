@@ -12,8 +12,10 @@ import { getChat } from '../chat-actions.js';
 import {
   buildMissionSnapshot,
   createMission,
+  getWorkflowRevision,
   latestMissionForChat,
   resolveWorkflowTemplate,
+  resolveWorkflowTemplateRevision,
   selectWorkflowTemplate,
   updateMissionForPlannedTurn,
   workflowRunForTurn,
@@ -63,7 +65,8 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
     : await latestMissionForChat(input.actor?.id ?? null, chatId);
   // Custom-aware: a user-edited template (same id as a builtin, or a novel
   // one) drives both the mission stages AND the generated task DAG.
-  const template = await resolveWorkflowTemplate(input.workflowTemplateId, message);
+  const resolvedWorkflow = await resolveWorkflowTemplateRevision(input.actor, input.workflowTemplateId, message);
+  const template = resolvedWorkflow.template;
   const now = nowIso();
   if (assessment.needsClarification) {
     const turn = buildTurn({
@@ -78,6 +81,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
       missionId: continuedMission?.id,
       workflowTemplateId: input.workflowTemplateId,
       template,
+      workflowRevisionId: resolvedWorkflow.workflowRevisionId,
       workingStyle,
     });
     const mission = await createMission({
@@ -90,6 +94,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
       needsClarification: true,
       workflowTemplateId: turn.workflowTemplateId,
       template,
+      workflowRevisionId: resolvedWorkflow.workflowRevisionId,
       workingStyle,
     });
     const turnWithMission = {
@@ -112,6 +117,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
     missionId: continuedMission?.id,
     workflowTemplateId: input.workflowTemplateId,
     template,
+    workflowRevisionId: resolvedWorkflow.workflowRevisionId,
     workingStyle,
   });
   const turn = await attachPlanningMeeting(draftTurn, message);
@@ -125,6 +131,7 @@ export async function createTurn(input: CreateTurnInput): Promise<TurnResponse> 
     needsClarification: false,
     workflowTemplateId: turn.workflowTemplateId,
     template,
+    workflowRevisionId: resolvedWorkflow.workflowRevisionId,
     workingStyle,
     standalone: intentType === 'question',
   });
@@ -156,6 +163,7 @@ function buildTurn(opts: {
   clarifyAnswers?: ClarifyAnswer[];
   missionId?: string | undefined;
   workflowTemplateId?: string | undefined;
+  workflowRevisionId?: string | null | undefined;
   // The custom-aware resolved template from resolveWorkflowTemplate(). The
   // sync fallback below only sees builtins, so async callers should always
   // resolve and pass this.
@@ -189,6 +197,7 @@ function buildTurn(opts: {
     plan,
     needsClarification: parked,
     workflowTemplateId: workflowTemplate.id,
+    workflowRevisionId: opts.workflowRevisionId,
   });
   const workflowRun = workflowRunForTurn({
     id: turnId,
@@ -196,6 +205,8 @@ function buildTurn(opts: {
     ownerId,
     missionId,
     workflowTemplateId: workflowTemplate.id,
+    workflowRevisionId: opts.workflowRevisionId ?? null,
+    activeExecutionRunId: null,
     message,
     workingStyle,
     status: 'done',
@@ -231,6 +242,8 @@ function buildTurn(opts: {
     ownerId,
     missionId,
     workflowTemplateId: workflowTemplate.id,
+    workflowRevisionId: opts.workflowRevisionId ?? null,
+    activeExecutionRunId: null,
     message,
     workingStyle,
     status: 'done',
@@ -283,7 +296,15 @@ export async function answerClarification(input: {
 
   const enrichedMessage = applyAnswers(existing.message, existing.clarifyQuestions, input.answers);
   const now = nowIso();
-  const resumedTemplate = await resolveWorkflowTemplate(existing.workflowTemplateId, enrichedMessage);
+  const pinnedRevision = existing.workflowRevisionId
+    ? await getWorkflowRevision(input.actor, existing.workflowRevisionId)
+    : null;
+  // The turn snapshot is the execution contract. It also covers deterministic
+  // builtin revision ids, which are not rows in workflowRevisions.
+  const existingSnapshot = existing.workflow as WorkflowTemplate | null;
+  const resumedTemplate = existingSnapshot
+    ?? pinnedRevision?.template
+    ?? await resolveWorkflowTemplate(existing.workflowTemplateId, enrichedMessage, input.actor);
   const draftPlan = buildTurn({
     turnId: existing.id,
     chatId: existing.localChatId,
@@ -294,6 +315,7 @@ export async function answerClarification(input: {
     missionId: existing.missionId,
     workflowTemplateId: existing.workflowTemplateId,
     template: resumedTemplate,
+    workflowRevisionId: existing.workflowRevisionId ?? null,
     workingStyle: existing.workingStyle,
   });
   const planned = await attachPlanningMeeting(draftPlan, enrichedMessage);

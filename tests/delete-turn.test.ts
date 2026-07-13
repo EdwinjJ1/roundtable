@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { approveTurn, createTurn, deleteTurn, getTurn } from '../src/server/actions/turn-actions.js';
+import { createChat, deleteChat } from '../src/server/actions/chat-actions.js';
+import { createWorkbench } from '../src/server/actions/workbench-actions.js';
 import { readData, resetData } from '../src/server/store.js';
 import type { Actor } from '../src/server/types.js';
 
@@ -39,12 +41,17 @@ afterEach(async () => {
 describe('deleteTurn — session + workspace cleanup', () => {
   it('removes the turn, its mission, and its managed workspace directory', async () => {
     const turn = await createTurn({ actor, message: 'Build a small page and review it.' });
-    await approveTurn({ turnId: turn.id, decision: 'approve', autoDispatch: true, agentAdapter: 'local-dispatch' });
+    await approveTurn({ actor, turnId: turn.id, decision: 'approve', autoDispatch: true, agentAdapter: 'local-dispatch' });
 
     const dispatched = await getTurn(turn.id);
     const workspace = dispatched?.dispatchWorkspacePath;
     expect(workspace).toBeTruthy();
     expect(await exists(workspace!)).toBe(true);
+    const beforeDelete = await readData();
+    expect(beforeDelete.executionRuns.some((run) => run.turnId === turn.id)).toBe(true);
+    expect(beforeDelete.taskAttempts.some((attempt) =>
+      beforeDelete.executionRuns.some((run) => run.turnId === turn.id && run.id === attempt.executionRunId),
+    )).toBe(true);
 
     const result = await deleteTurn(turn.id, { actor });
     expect(result.id).toBe(turn.id);
@@ -52,8 +59,32 @@ describe('deleteTurn — session + workspace cleanup', () => {
     expect(await getTurn(turn.id)).toBeNull();
     const data = await readData();
     expect(data.missions.some((mission) => mission.sourceTurnId === turn.id)).toBe(false);
+    expect(data.executionRuns.some((run) => run.turnId === turn.id)).toBe(false);
+    expect(data.taskAttempts.some((attempt) => beforeDelete.executionRuns.some((run) =>
+      run.turnId === turn.id && run.id === attempt.executionRunId,
+    ))).toBe(false);
     // The managed workspace (under ROUNDTABLE_WORKSPACE_ROOT) is gone.
     expect(await exists(workspace!)).toBe(false);
+  });
+
+  it('deleting a chat removes execution history for every turn in the chat', async () => {
+    const workbench = await createWorkbench(actor, { name: 'Delete chat history' });
+    const chat = await createChat(actor, { workbenchId: workbench.id, title: 'Delete chat history' });
+    const turn = await createTurn({ actor, chatId: chat.id, message: 'Build a React profile page.' });
+    const dispatched = await approveTurn({
+      actor,
+      turnId: turn.id,
+      decision: 'approve',
+      autoDispatch: true,
+      agentAdapter: 'local-dispatch',
+    });
+    expect(dispatched.activeExecutionRunId).toBeTruthy();
+
+    await deleteChat(actor, chat.id);
+
+    const data = await readData();
+    expect(data.executionRuns.some((run) => run.turnId === turn.id)).toBe(false);
+    expect(data.taskAttempts.some((attempt) => attempt.executionRunId === dispatched.activeExecutionRunId)).toBe(false);
   });
 
   it('rejects deletion by a different owner', async () => {

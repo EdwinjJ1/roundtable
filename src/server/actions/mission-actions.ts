@@ -1,4 +1,5 @@
 import { id, mutateData, nowIso, readData } from '../store.js';
+import { createHash } from 'node:crypto';
 import type {
   Actor,
   Artifact,
@@ -19,6 +20,9 @@ import type {
   WorkflowStage,
   WorkflowStageRunStatus,
   WorkflowTemplate,
+  Workflow,
+  WorkflowRevision,
+  OwnedWorkflow,
   AgentRole,
 } from '../types.js';
 import { AGENT_ROSTER, agentCardFor, agentForTask } from './agent-roster.js';
@@ -284,6 +288,7 @@ export type CreateMissionInput = {
   plan: Plan;
   needsClarification: boolean;
   workflowTemplateId?: string | undefined;
+  workflowRevisionId?: string | null | undefined;
   // The already-resolved template (custom-aware). When present it wins over
   // id-based resolution, so custom templates flow through without a re-read.
   template?: WorkflowTemplate | undefined;
@@ -301,6 +306,24 @@ export async function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
   );
   const extra = custom.filter((template) => !BUILTIN_WORKFLOW_TEMPLATES.some((builtin) => builtin.id === template.id));
   return [...overridden, ...extra].map(cloneTemplate);
+}
+
+export type EditableWorkflowTemplate = WorkflowTemplate & { expectedRevision: number };
+
+export async function listWorkflowTemplatesForActor(actor: Actor): Promise<EditableWorkflowTemplate[]> {
+  const owned = await listOwnedWorkflows(actor);
+  const custom = owned.map(({ workflow, latestRevision }) => ({
+    ...cloneTemplate(latestRevision.template),
+    expectedRevision: workflow.latestRevision,
+  }));
+  const overridden = BUILTIN_WORKFLOW_TEMPLATES.map((builtin) =>
+    custom.find((template) => template.id === builtin.id)
+      ?? { ...cloneTemplate(builtin), expectedRevision: 0 },
+  );
+  return [
+    ...overridden,
+    ...custom.filter((template) => !BUILTIN_WORKFLOW_TEMPLATES.some((builtin) => builtin.id === template.id)),
+  ];
 }
 
 export function workflowTemplateById(
@@ -333,9 +356,40 @@ export function selectWorkflowTemplate(message: string, custom: WorkflowTemplate
 export async function resolveWorkflowTemplate(
   idValue: string | null | undefined,
   message: string,
+  actor?: Actor | null | undefined,
 ): Promise<WorkflowTemplate> {
+  if (actor) return (await resolveWorkflowTemplateRevision(actor, idValue, message)).template;
   const custom = await customWorkflowTemplates();
   return idValue ? workflowTemplateById(idValue, custom) : selectWorkflowTemplate(message, custom);
+}
+
+export async function resolveWorkflowTemplateRevision(
+  actor: Actor | null | undefined,
+  idValue: string | null | undefined,
+  message: string,
+): Promise<{ template: WorkflowTemplate; workflowRevisionId: string }> {
+  if (actor) {
+    const data = await readData();
+    const selectedId = idValue ?? selectWorkflowTemplate(message).id;
+    const workflow = data.workflows.find((item) => item.ownerId === actor.id && item.id === selectedId);
+    const revision = workflow
+      ? data.workflowRevisions.find((item) => item.ownerId === actor.id && item.id === workflow.latestRevisionId)
+      : null;
+    if (revision) return { template: cloneTemplate(revision.template), workflowRevisionId: revision.id };
+    const builtin = idValue ? workflowTemplateById(idValue) : selectWorkflowTemplate(message);
+    return { template: builtin, workflowRevisionId: builtinWorkflowRevisionId(builtin) };
+  }
+  // Legacy/global settings are read only by the unauthenticated local
+  // compatibility path. Authenticated requests above never inherit them.
+  const template = await resolveWorkflowTemplate(idValue, message);
+  return {
+    template,
+    workflowRevisionId: builtinWorkflowRevisionId(template),
+  };
+}
+
+function builtinWorkflowRevisionId(template: WorkflowTemplate): string {
+  return `builtin:${template.id}:v${template.version}`;
 }
 
 async function customWorkflowTemplates(): Promise<WorkflowTemplate[]> {
@@ -353,12 +407,107 @@ export class WorkflowTemplateError extends Error {
   }
 }
 
-// Persist a user-edited workflow template. Same-id-as-builtin = override; new
-// id = additional workflow. Validation is structural: the editor UI owns
-// cosmetics, but a template that cannot produce a runnable task DAG (no
-// plan/work/review stage, or a seat pointing at an unknown agent) is rejected
-// here so the orchestrator never trips over it at mission time.
-export async function saveWorkflowTemplate(template: WorkflowTemplate): Promise<WorkflowTemplate> {
+export type SaveWorkflowRevisionInput = {
+  template: WorkflowTemplate;
+  expectedRevision: number;
+};
+
+export type SaveWorkflowRevisionResult = {
+  workflow: Workflow;
+  revision: WorkflowRevision;
+};
+
+export async function saveWorkflowRevision(
+  actor: Actor,
+  input: SaveWorkflowRevisionInput,
+): Promise<SaveWorkflowRevisionResult> {
+  validateWorkflowTemplate(input.template);
+  return mutateData((data) => {
+    const workflowId = input.template.id.trim();
+    const existing = data.workflows.find((item) => item.ownerId === actor.id && item.id === workflowId);
+    const currentRevision = existing?.latestRevision ?? 0;
+    if (currentRevision !== input.expectedRevision) {
+      throw new WorkflowTemplateError('workflow_revision_conflict', 409);
+    }
+    const now = nowIso();
+    const revisionNumber = currentRevision + 1;
+    const template: WorkflowTemplate = {
+      ...cloneTemplate(input.template),
+      id: workflowId,
+      builtin: false,
+      version: revisionNumber,
+      updatedAt: now,
+    };
+    const revision: WorkflowRevision = {
+      id: id('workflow_revision'),
+      workflowId: template.id,
+      workflowStorageId: existing?.storageId ?? id('workflow'),
+      ownerId: actor.id,
+      revision: revisionNumber,
+      contentHash: workflowExecutableContentHash(template),
+      template,
+      createdAt: now,
+    };
+    const workflow: Workflow = {
+      storageId: existing?.storageId ?? revision.workflowStorageId,
+      id: template.id,
+      ownerId: actor.id,
+      name: template.name,
+      latestRevision: revisionNumber,
+      latestRevisionId: revision.id,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      archivedAt: null,
+    };
+    data.workflows = [workflow, ...data.workflows.filter((item) => !(item.ownerId === actor.id && item.id === workflow.id))];
+    data.workflowRevisions.push(revision);
+    return { workflow, revision };
+  });
+}
+
+export async function listOwnedWorkflows(actor: Actor): Promise<OwnedWorkflow[]> {
+  const data = await readData();
+  return data.workflows
+    .filter((workflow) => workflow.ownerId === actor.id && !workflow.archivedAt)
+    .map((workflow) => ({
+      workflow,
+      latestRevision: data.workflowRevisions.find((revision) =>
+        revision.ownerId === actor.id && revision.id === workflow.latestRevisionId,
+      )!,
+    }))
+    .filter((item) => Boolean(item.latestRevision))
+    .sort((a, b) => b.workflow.updatedAt.localeCompare(a.workflow.updatedAt));
+}
+
+export async function archiveOwnedWorkflow(actor: Actor, workflowId: string): Promise<void> {
+  await mutateData((data) => {
+    const workflow = data.workflows.find((item) => item.ownerId === actor.id && item.id === workflowId);
+    if (!workflow || workflow.archivedAt) return;
+    workflow.archivedAt = nowIso();
+    workflow.updatedAt = workflow.archivedAt;
+  });
+}
+
+export async function getWorkflowRevision(actor: Actor, revisionId: string): Promise<WorkflowRevision | null> {
+  const data = await readData();
+  return data.workflowRevisions.find((revision) => revision.ownerId === actor.id && revision.id === revisionId) ?? null;
+}
+
+export function workflowExecutableContentHash(template: WorkflowTemplate): string {
+  const spec = { planning: template.planning, stages: template.stages };
+  return createHash('sha256').update(stableJson(spec)).digest('hex');
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function validateWorkflowTemplate(template: WorkflowTemplate): void {
   const idValue = (template.id ?? '').trim();
   if (!idValue) throw new WorkflowTemplateError('missing_template_id');
   if (!(template.name ?? '').trim()) throw new WorkflowTemplateError('missing_template_name');
@@ -384,6 +533,16 @@ export async function saveWorkflowTemplate(template: WorkflowTemplate): Promise<
   if (!template.stages.some(stageCanCreateTask)) {
     throw new WorkflowTemplateError('no_runnable_agent_seat');
   }
+}
+
+// Persist a user-edited workflow template. Same-id-as-builtin = override; new
+// id = additional workflow. Validation is structural: the editor UI owns
+// cosmetics, but a template that cannot produce a runnable task DAG (no
+// plan/work/review stage, or a seat pointing at an unknown agent) is rejected
+// here so the orchestrator never trips over it at mission time.
+export async function saveWorkflowTemplate(template: WorkflowTemplate): Promise<WorkflowTemplate> {
+  validateWorkflowTemplate(template);
+  const idValue = template.id.trim();
   const stored: WorkflowTemplate = {
     ...cloneTemplate(template),
     id: idValue,
@@ -501,6 +660,8 @@ export function buildMissionSnapshot(input: CreateMissionInput): Mission {
     workingStyle: input.workingStyle ?? { skills: [], projectRules: [] },
     status: input.needsClarification ? 'awaiting_clarification' : 'awaiting_approval',
     workflowTemplateId: template.id,
+    workflowRevisionId: input.workflowRevisionId ?? builtinWorkflowRevisionId(template),
+    workflowContentHash: workflowExecutableContentHash(template),
     workflowTemplateName: template.name,
     currentStageId: input.needsClarification ? 'clarify' : 'plan',
     stages: template.stages.map((stage): MissionStage => ({
@@ -899,6 +1060,8 @@ function missionFromTurnSnapshot(turn: LocalTurn, template: WorkflowTemplate): M
     workingStyle: turn.workingStyle ?? { skills: [], projectRules: [] },
     status: missionStatusFromTurn(turn, []),
     workflowTemplateId: template.id,
+    workflowRevisionId: turn.workflowRevisionId ?? null,
+    workflowContentHash: workflowExecutableContentHash(template),
     workflowTemplateName: template.name,
     currentStageId: turn.dispatchStatus === 'completed' ? 'ship' : turn.needsClarification ? 'clarify' : 'plan',
     stages: template.stages.map((stage) => ({

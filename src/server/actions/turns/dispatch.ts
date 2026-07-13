@@ -12,6 +12,14 @@ import { MiniMaxUnavailableError } from '../adapters/minimax-adapter.js';
 import { OpenAICompatUnavailableError } from '../adapters/openai-compat-adapter.js';
 import { normalizeAdapter, runAgentTask } from '../agent-runner.js';
 import {
+  createExecutionRun,
+  executionRunIsActive,
+  finishExecutionRun,
+  finishTaskAttempt,
+  interruptExecutionRun,
+  startTaskAttempt,
+} from '../execution-actions.js';
+import {
   buildHandoffCardV2,
   buildMissionSnapshot,
   setMissionRejected,
@@ -146,6 +154,9 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   );
   const runtimeEnv = { ...process.env };
   const workspace = await prepareWorkspace(turn);
+  const executionRun = input.actor
+    ? await createExecutionRun(input.actor, { missionId: turn.missionId, turnId: turn.id })
+    : null;
   await updateTurn(turn.id, (current) => ({
     ...current,
     dispatchStatus: 'running',
@@ -153,6 +164,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     dispatchStage: 'dispatch',
     dispatchError: null,
     dispatchWorkspacePath: workspace,
+    activeExecutionRunId: executionRun?.id ?? current.activeExecutionRunId ?? null,
   }), input);
 
   // Per-task side data the scheduler's lean TaskResult doesn't carry: the agent
@@ -195,6 +207,13 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
     task: PlanTask,
     depOutputs: Record<string, { summary: string; artifactId?: string | undefined }>,
   ): Promise<TaskResult> => {
+    if (
+      executionRun
+      && input.actor
+      && !await executionRunIsActive(input.actor, executionRun.id, executionRun.generation)
+    ) {
+      return { ok: false, error: { message: 'execution_run_fenced' } };
+    }
     const patch = patchByTask.get(task.id);
     const effectiveTask = patch ? { ...task, ...patch } : task;
     const depEntries = Object.entries(depOutputs);
@@ -216,6 +235,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
         plan: turn.plan,
         needsClarification: turn.needsClarification,
         workflowTemplateId: turn.workflowTemplateId,
+        workflowRevisionId: turn.workflowRevisionId ?? null,
       }),
       turn,
       task: effectiveTask,
@@ -329,6 +349,7 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   // Fixer tasks the scheduler derives at runtime, keyed by id, so onTaskState can
   // fold them into the persisted plan as they start (the UI reads plan.tasks).
   const derivedById = new Map<string, PlanTask>();
+  const attemptIdByTask = new Map<string, string>();
 
   // Stream per-task progress into the turn's workflowRun.stageStates as each
   // agent starts/finishes, so the polling UI can animate the roundtable (who's
@@ -337,7 +358,23 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   // not race the final updateTurn (which only runs after the scheduler returns).
   const schedulerToStage = { running: 'running', completed: 'done', failed: 'failed', blocked: 'blocked' } as const;
   const onTaskState = async (taskId: string, status: 'running' | 'completed' | 'failed' | 'blocked') => {
+    const latestBeforeProgress = await getTurn(turn.id, input);
+    if (!latestBeforeProgress || latestBeforeProgress.dispatchStage === 'interrupted') return;
     const derived = derivedById.get(taskId);
+    if (executionRun && input.actor && status === 'running') {
+      const taskSnapshot = derived ?? turn.plan.tasks.find((task) => task.id === taskId);
+      const attempt = await startTaskAttempt(input.actor, {
+        executionRunId: executionRun.id,
+        taskId,
+        ...(taskSnapshot ? { taskSnapshot } : {}),
+        expectedGeneration: executionRun.generation,
+      });
+      attemptIdByTask.set(taskId, attempt.id);
+    } else if (executionRun && input.actor && (status === 'completed' || status === 'failed')) {
+      const attemptId = attemptIdByTask.get(taskId);
+      if (!attemptId) throw new ActionError('task_attempt_not_started', 409);
+      await finishTaskAttempt(input.actor, { attemptId, status, expectedGeneration: executionRun.generation });
+    }
     // Persist this task's artifacts as soon as it reaches a terminal state — not
     // only at the end-of-run fold. An interrupted or crashed run must not lose
     // the work of tasks that already finished (their files exist in the
@@ -408,10 +445,11 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
       const enriched: PlanTask = repairTarget?.artifact
         ? {
             ...fixer,
+            producedFor: failed.id,
             repairTargetPath: repairTarget.artifact.title,
             repairTargetTaskId: repairTarget.taskId,
           }
-        : fixer;
+        : { ...fixer, producedFor: failed.id };
       // Remember it so onTaskState can add it to the persisted plan when it runs
       // (a concurrent write here would race the store's read-modify-write).
       derivedById.set(enriched.id, enriched);
@@ -471,6 +509,17 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
   const failed = run.tasks.some(
     (task) => (task.status === 'failed' || task.status === 'blocked') && !repaired.has(task.id),
   );
+  if (executionRun && input.actor) {
+    const finishedRun = await finishExecutionRun(
+      input.actor,
+      executionRun.id,
+      failed ? 'failed' : 'completed',
+      executionRun.generation,
+    );
+    if (!finishedRun) {
+      return dispatchResponse(requireTurn(await getTurn(turn.id, input)));
+    }
+  }
   // A question turn delivers an answer, not a build: delivery-report artifacts
   // (review summary, final report) would be noise on top of it.
   const isQuestionTurn = turn.intake.intentType === 'question';
@@ -550,6 +599,9 @@ export async function dispatchTurn(input: DispatchInput): Promise<DispatchRespon
 export async function interruptTurn(turnId: string, access?: { actor?: Actor | null | undefined } | undefined): Promise<DispatchResponse> {
   const existing = await getTurn(turnId, access);
   if (!existing) throw new ActionError('turn_not_found', 404);
+  if (existing.activeExecutionRunId && access?.actor) {
+    await interruptExecutionRun(access.actor, existing.activeExecutionRunId);
+  }
   const turn = await updateTurn(turnId, (current) => ({
     ...current,
     dispatchStatus: 'failed',

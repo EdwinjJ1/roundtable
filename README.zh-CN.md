@@ -4,10 +4,10 @@
 
 # Roundtable
 
-**一张圆桌,一支 AI 开发小队。**
+**把 AI 编程会话变成可复用、可审查的工作流。**
 
-用一句话描述你要做什么——然后*亲眼看着*一支常驻的 AI 智能体小队完成规划、
-并行实现、审查把关、直至交付。每一个文件、diff、预览和决策都留在桌面上。
+Roundtable 是 Claude Code、Codex 等本机智能体之上的可视化工作流与治理层。
+保存一次成功的工作方式，反复运行，并在规划、权限、审查和交付节点保持掌控。
 
 [![CI](https://github.com/EdwinjJ1/roundtable/actions/workflows/ci.yml/badge.svg)](https://github.com/EdwinjJ1/roundtable/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

@@ -19,7 +19,8 @@ function Modal({ title, sub, icon, onClose, children, footer, width = 540 }) {
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 120, background: alpha('#000', 38),
       backdropFilter: 'blur(3px)', overflowY: 'auto' }}>
       <div style={{ minHeight: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, boxSizing: 'border-box' }}>
-        <div onClick={(e) => e.stopPropagation()} className="rt-zoom" style={{ width: `min(${width}px, 100%)`,
+        <div onClick={(e) => e.stopPropagation()} className="rt-zoom" role="dialog" aria-modal="true" aria-label={title}
+          style={{ width: `min(${width}px, 100%)`,
           transformOrigin: 'center', background: 'var(--surface)', borderRadius: 'var(--r-card)',
           border: '1px solid var(--border)', boxShadow: 'var(--shadow-pop)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '15px 18px', borderBottom: '1px solid var(--border)' }}>

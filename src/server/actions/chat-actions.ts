@@ -52,6 +52,12 @@ export async function deleteChat(actor: Actor, chatId: string): Promise<{ id: st
       .filter((turn) => turn.localChatId === chatId)
       .map((turn) => turn.dispatchWorkspacePath)
       .filter((path): path is string => Boolean(path));
+    const turnIds = new Set(data.turns.filter((turn) => turn.localChatId === chatId).map((turn) => turn.id));
+    const executionRunIds = new Set(
+      data.executionRuns.filter((run) => turnIds.has(run.turnId)).map((run) => run.id),
+    );
+    data.taskAttempts = data.taskAttempts.filter((attempt) => !executionRunIds.has(attempt.executionRunId));
+    data.executionRuns = data.executionRuns.filter((run) => !turnIds.has(run.turnId));
     data.chats = data.chats.filter((item) => item.id !== chatId);
     data.messages = data.messages.filter((message) => message.chatId !== chatId);
     data.artifacts = data.artifacts.filter((artifact) => artifact.chatId !== chatId);

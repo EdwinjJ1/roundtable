@@ -36,6 +36,7 @@
     "incremental": true
   },
   "include": [
+    ".next/types/**/*.ts",
     "next-env.d.ts",
     "scripts/**/*.ts",
     "src/**/*.js",
@@ -43,7 +44,7 @@
     "src/**/*.ts",
     "src/**/*.tsx",
     "tests/**/*.ts",
-    ".next/types/**/*.ts"
+    ".next-playwright/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

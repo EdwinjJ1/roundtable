@@ -129,6 +129,86 @@ export type WorkflowTemplate = {
   stages: WorkflowStage[];
 };
 
+// Owner-scoped identity for a user-authored workflow. The mutable row only
+// points at the latest immutable revision; missions always pin a revision id.
+export type Workflow = {
+  storageId: string;
+  id: string;
+  ownerId: string;
+  name: string;
+  latestRevision: number;
+  latestRevisionId: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
+
+export type WorkflowRevision = {
+  id: string;
+  workflowId: string;
+  workflowStorageId: string;
+  ownerId: string;
+  revision: number;
+  contentHash: string;
+  template: WorkflowTemplate;
+  createdAt: string;
+};
+
+export type OwnedWorkflow = {
+  workflow: Workflow;
+  latestRevision: WorkflowRevision;
+};
+
+export type ExecutionRunStatus =
+  | 'created'
+  | 'awaiting_permission'
+  | 'running'
+  | 'pause_requested'
+  | 'paused'
+  | 'resuming'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export type ExecutionRun = {
+  id: string;
+  ownerId: string;
+  missionId: string;
+  turnId: string;
+  workflowId: string;
+  workflowRevisionId: string | null;
+  workflowContentHash: string;
+  workflowSnapshot: WorkflowTemplate;
+  planSnapshot: Plan;
+  taskSnapshots: PlanTask[];
+  status: ExecutionRunStatus;
+  generation: number;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  // Set when a fenced/cancelled worker eventually returns. The run remains
+  // cancelled; this timestamp proves the late completion was observed.
+  workerFinishedAt?: string | null;
+};
+
+export type TaskAttemptStatus = 'created' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+
+export type TaskAttempt = {
+  id: string;
+  ownerId: string;
+  executionRunId: string;
+  taskId: string;
+  attempt: number;
+  status: TaskAttemptStatus;
+  runtime: AgentRuntimeKind | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
+};
+
 export type AgentRole = 'planner' | 'pm' | 'architect' | 'implementer' | 'reviewer' | 'fixer';
 
 export type AgentRuntimeKind =
@@ -519,6 +599,10 @@ export type Mission = {
   workingStyle: WorkingStyleSnapshot;
   status: MissionStatus;
   workflowTemplateId: string;
+  // Immutable workflow definition used to create the mission. Optional only
+  // for records persisted before workflow revisions existed.
+  workflowRevisionId?: string | null;
+  workflowContentHash?: string | null;
   workflowTemplateName: string;
   currentStageId: string | null;
   stages: MissionStage[];
@@ -574,6 +658,9 @@ export type LocalTurn = {
   ownerId: string | null;
   missionId: string;
   workflowTemplateId: string;
+  // Immutable workflow definition used by this turn. Legacy turns omit it.
+  workflowRevisionId?: string | null;
+  activeExecutionRunId?: string | null;
   message: string;
   workingStyle: WorkingStyleSnapshot;
   status: 'pending' | 'done' | 'error';

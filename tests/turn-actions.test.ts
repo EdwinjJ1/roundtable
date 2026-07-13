@@ -12,6 +12,7 @@ import {
   listTurns,
 } from '../src/server/actions/turn-actions.js';
 import { saveAgentRuntimeConfig } from '../src/server/actions/runtime-actions.js';
+import { getExecutionRun } from '../src/server/actions/execution-actions.js';
 import { createWorkbench } from '../src/server/actions/workbench-actions.js';
 import { resetData } from '../src/server/store.js';
 import type { Actor } from '../src/server/types.js';
@@ -124,6 +125,10 @@ describe('dispatchTurn — DAG scheduler integration', () => {
     expect(fixers.length).toBeGreaterThanOrEqual(1);
     expect(fixers.length).toBeLessThanOrEqual(2);
     expect(fixers.every((r) => (r.fixRound ?? 0) <= 2)).toBe(true);
+    const execution = await getExecutionRun(actor, result.activeExecutionRunId!);
+    expect(execution?.run.status).toBe('failed');
+    expect(execution?.attempts.filter((attempt) => attempt.status === 'failed').map((attempt) => attempt.taskId))
+      .toEqual(expect.arrayContaining(failed.map((record) => record.taskId)));
     // Spawns ~5 sequential node fixtures; under full-suite CPU contention the
     // default 10s budget flakes (also on the unmodified baseline).
   }, 30_000);
@@ -228,6 +233,37 @@ describe('dispatchTurn — DAG scheduler integration', () => {
     expect(interrupted.workflowRun).not.toBeNull();
   });
 
+  it('keeps interruption terminal when a background worker finishes late', async () => {
+    process.env.ROUNDTABLE_ENABLE_EXTERNAL_AGENT = 'true';
+    await saveAgentRuntimeConfig({
+      agentId: 'atlas',
+      runtime: 'claude-code',
+      command: process.execPath,
+      args: ['-e', 'setTimeout(() => process.stdout.write("late result"), 600)'],
+    });
+    const turn = await createTurn({ actor, message: '@atlas build the navbar.' });
+    await approveTurn({
+      actor,
+      turnId: turn.id,
+      decision: 'approve',
+      autoDispatch: true,
+      background: true,
+      agentAdapter: 'agent-cli',
+    });
+    const running = await waitForTurn(turn.id, (candidate) => Boolean(candidate.activeExecutionRunId));
+    const runId = running.activeExecutionRunId!;
+    await waitForExecution(runId, (execution) => execution.attempts.some((attempt) => attempt.status === 'running'));
+
+    await interruptTurn(turn.id, { actor });
+    await waitForExecution(runId, (execution) => Boolean(execution.run.workerFinishedAt));
+
+    const finalTurn = await getTurn(turn.id, { actor });
+    const execution = await getExecutionRun(actor, runId);
+    expect(finalTurn).toMatchObject({ dispatchStage: 'interrupted', dispatchStatus: 'failed' });
+    expect(execution?.run.status).toBe('cancelled');
+    expect(execution?.attempts.some((attempt) => attempt.status === 'interrupted' && attempt.finishedAt)).toBe(true);
+  });
+
   it('attaches per-task runtime conversation transcripts to listed turns', async () => {
     await configureRuntimeOutput('atlas', 'navbar built');
 
@@ -286,6 +322,30 @@ async function configureRuntimeOutput(agentId: string, text: string): Promise<vo
     command: process.execPath,
     args: ['-e', `process.stdout.write(${JSON.stringify(text)})`],
   });
+}
+
+async function waitForTurn(
+  turnId: string,
+  predicate: (turn: NonNullable<Awaited<ReturnType<typeof getTurn>>>) => boolean,
+) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const turn = await getTurn(turnId, { actor });
+    if (turn && predicate(turn)) return turn;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('turn_wait_timeout');
+}
+
+async function waitForExecution(
+  runId: string,
+  predicate: (execution: NonNullable<Awaited<ReturnType<typeof getExecutionRun>>>) => boolean,
+) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const execution = await getExecutionRun(actor, runId);
+    if (execution && predicate(execution)) return execution;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('execution_wait_timeout');
 }
 
 function setNodeEnv(value: string | undefined): void {

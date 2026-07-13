@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import pg from 'pg';
@@ -11,12 +11,16 @@ import type {
   BreakoutMessage,
   BreakoutRoom,
   Chat,
+  ExecutionRun,
   Handoff,
   LocalTurn,
   Message,
   Mission,
   RoundtableSettings,
+  TaskAttempt,
   UserProfile,
+  Workflow,
+  WorkflowRevision,
   Workbench,
   WorkbenchPin,
 } from './types.js';
@@ -35,6 +39,10 @@ export type RoundtableData = {
   workbenchPins: WorkbenchPin[];
   turns: LocalTurn[];
   missions: Mission[];
+  workflows: Workflow[];
+  workflowRevisions: WorkflowRevision[];
+  executionRuns: ExecutionRun[];
+  taskAttempts: TaskAttempt[];
   agentRuntimeConfigs: AgentRuntimeConfig[];
   agentRuntimeDefaults: AgentRuntimeDefaultConfig[];
   agentRuntimeConversations: AgentRuntimeConversation[];
@@ -446,6 +454,60 @@ const NORMALIZED_TABLE_STATEMENTS = [
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (store_key, id)
   )`,
+  `CREATE TABLE IF NOT EXISTS roundtable_workflows (
+    store_key text NOT NULL,
+    storage_id text NOT NULL,
+    owner_id text NOT NULL,
+    workflow_id text NOT NULL,
+    latest_revision_id text NOT NULL,
+    record_updated_at timestamptz NOT NULL,
+    data jsonb NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (store_key, storage_id),
+    UNIQUE (store_key, owner_id, workflow_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS roundtable_workflow_revisions (
+    store_key text NOT NULL,
+    id text NOT NULL,
+    owner_id text NOT NULL,
+    workflow_storage_id text NOT NULL,
+    revision integer NOT NULL,
+    content_hash text NOT NULL,
+    created_at timestamptz NOT NULL,
+    data jsonb NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (store_key, id),
+    UNIQUE (store_key, workflow_storage_id, revision)
+  )`,
+  `CREATE TABLE IF NOT EXISTS roundtable_execution_runs (
+    store_key text NOT NULL,
+    id text NOT NULL,
+    owner_id text NOT NULL,
+    mission_id text NOT NULL,
+    turn_id text NOT NULL,
+    workflow_revision_id text,
+    status text NOT NULL,
+    created_at timestamptz NOT NULL,
+    record_updated_at timestamptz NOT NULL,
+    data jsonb NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (store_key, id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS roundtable_task_attempts (
+    store_key text NOT NULL,
+    id text NOT NULL,
+    owner_id text NOT NULL,
+    execution_run_id text NOT NULL,
+    task_id text NOT NULL,
+    attempt integer NOT NULL,
+    status text NOT NULL,
+    created_at timestamptz NOT NULL,
+    record_updated_at timestamptz NOT NULL,
+    data jsonb NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (store_key, id),
+    UNIQUE (store_key, execution_run_id, task_id, attempt)
+  )`,
   `CREATE TABLE IF NOT EXISTS roundtable_agent_runtime_configs (
     store_key text NOT NULL,
     agent_id text NOT NULL,
@@ -501,6 +563,10 @@ const NORMALIZED_INDEX_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS roundtable_turns_chat_created_idx ON roundtable_turns (store_key, local_chat_id, created_at)',
   'CREATE INDEX IF NOT EXISTS roundtable_missions_chat_created_idx ON roundtable_missions (store_key, chat_id, created_at)',
   'CREATE INDEX IF NOT EXISTS roundtable_missions_status_idx ON roundtable_missions (store_key, status)',
+  'CREATE INDEX IF NOT EXISTS roundtable_workflows_owner_updated_idx ON roundtable_workflows (store_key, owner_id, record_updated_at)',
+  'CREATE INDEX IF NOT EXISTS roundtable_workflow_revisions_workflow_idx ON roundtable_workflow_revisions (store_key, workflow_storage_id, revision)',
+  'CREATE INDEX IF NOT EXISTS roundtable_execution_runs_mission_idx ON roundtable_execution_runs (store_key, mission_id, created_at)',
+  'CREATE INDEX IF NOT EXISTS roundtable_task_attempts_run_task_idx ON roundtable_task_attempts (store_key, execution_run_id, task_id, attempt)',
   'CREATE INDEX IF NOT EXISTS roundtable_agent_runtime_conversations_turn_idx ON roundtable_agent_runtime_conversations (store_key, turn_id)',
 ];
 
@@ -518,6 +584,13 @@ const NORMALIZED_CONSTRAINT_STATEMENTS = [
   normalizedConstraint('roundtable_workbench_pins_user_fk', 'roundtable_workbench_pins', '(store_key, user_id)', 'roundtable_users', '(store_key, id)'),
   normalizedConstraint('roundtable_workbench_pins_workbench_fk', 'roundtable_workbench_pins', '(store_key, workbench_id)', 'roundtable_workbenches', '(store_key, id)'),
   normalizedConstraint('roundtable_missions_chat_fk', 'roundtable_missions', '(store_key, chat_id)', 'roundtable_chats', '(store_key, id)'),
+  normalizedConstraint('roundtable_workflows_owner_fk', 'roundtable_workflows', '(store_key, owner_id)', 'roundtable_users', '(store_key, id)'),
+  normalizedConstraint('roundtable_workflow_revisions_owner_fk', 'roundtable_workflow_revisions', '(store_key, owner_id)', 'roundtable_users', '(store_key, id)'),
+  normalizedConstraint('roundtable_workflow_revisions_workflow_fk', 'roundtable_workflow_revisions', '(store_key, workflow_storage_id)', 'roundtable_workflows', '(store_key, storage_id)'),
+  normalizedConstraint('roundtable_execution_runs_owner_fk', 'roundtable_execution_runs', '(store_key, owner_id)', 'roundtable_users', '(store_key, id)'),
+  normalizedConstraint('roundtable_execution_runs_mission_fk', 'roundtable_execution_runs', '(store_key, mission_id)', 'roundtable_missions', '(store_key, id)'),
+  normalizedConstraint('roundtable_task_attempts_owner_fk', 'roundtable_task_attempts', '(store_key, owner_id)', 'roundtable_users', '(store_key, id)'),
+  normalizedConstraint('roundtable_task_attempts_run_fk', 'roundtable_task_attempts', '(store_key, execution_run_id)', 'roundtable_execution_runs', '(store_key, id)'),
 ];
 
 const NORMALIZED_TABLE_SPECS = [
@@ -712,6 +785,77 @@ const NORMALIZED_TABLE_SPECS = [
       { name: 'source_turn_id', value: (row) => row.sourceTurnId },
       { name: 'status', value: (row) => row.status },
       { name: 'workflow_template_id', value: (row) => row.workflowTemplateId },
+      { name: 'created_at', value: (row) => row.createdAt },
+      { name: 'record_updated_at', value: (row) => row.updatedAt },
+    ],
+  }),
+  makeTableSpec<Workflow>({
+    table: 'roundtable_workflows',
+    idColumn: 'storage_id',
+    rows: (data) => data.workflows,
+    assign: (data, rows) => {
+      data.workflows = rows;
+    },
+    id: (row) => row.storageId,
+    orderBy: 'record_updated_at DESC, storage_id ASC',
+    columns: [
+      { name: 'owner_id', value: (row) => row.ownerId },
+      { name: 'workflow_id', value: (row) => row.id },
+      { name: 'latest_revision_id', value: (row) => row.latestRevisionId },
+      { name: 'record_updated_at', value: (row) => row.updatedAt },
+    ],
+  }),
+  makeTableSpec<WorkflowRevision>({
+    table: 'roundtable_workflow_revisions',
+    idColumn: 'id',
+    rows: (data) => data.workflowRevisions,
+    assign: (data, rows) => {
+      data.workflowRevisions = rows;
+    },
+    id: (row) => row.id,
+    orderBy: 'created_at ASC, id ASC',
+    columns: [
+      { name: 'owner_id', value: (row) => row.ownerId },
+      { name: 'workflow_storage_id', value: (row) => row.workflowStorageId },
+      { name: 'revision', value: (row) => row.revision },
+      { name: 'content_hash', value: (row) => row.contentHash },
+      { name: 'created_at', value: (row) => row.createdAt },
+    ],
+  }),
+  makeTableSpec<ExecutionRun>({
+    table: 'roundtable_execution_runs',
+    idColumn: 'id',
+    rows: (data) => data.executionRuns,
+    assign: (data, rows) => {
+      data.executionRuns = rows;
+    },
+    id: (row) => row.id,
+    orderBy: 'created_at ASC, id ASC',
+    columns: [
+      { name: 'owner_id', value: (row) => row.ownerId },
+      { name: 'mission_id', value: (row) => row.missionId },
+      { name: 'turn_id', value: (row) => row.turnId },
+      { name: 'workflow_revision_id', value: (row) => row.workflowRevisionId },
+      { name: 'status', value: (row) => row.status },
+      { name: 'created_at', value: (row) => row.createdAt },
+      { name: 'record_updated_at', value: (row) => row.updatedAt },
+    ],
+  }),
+  makeTableSpec<TaskAttempt>({
+    table: 'roundtable_task_attempts',
+    idColumn: 'id',
+    rows: (data) => data.taskAttempts,
+    assign: (data, rows) => {
+      data.taskAttempts = rows;
+    },
+    id: (row) => row.id,
+    orderBy: 'created_at ASC, id ASC',
+    columns: [
+      { name: 'owner_id', value: (row) => row.ownerId },
+      { name: 'execution_run_id', value: (row) => row.executionRunId },
+      { name: 'task_id', value: (row) => row.taskId },
+      { name: 'attempt', value: (row) => row.attempt },
+      { name: 'status', value: (row) => row.status },
       { name: 'created_at', value: (row) => row.createdAt },
       { name: 'record_updated_at', value: (row) => row.updatedAt },
     ],
@@ -934,6 +1078,10 @@ function emptyData(): RoundtableData {
     workbenchPins: [],
     turns: [],
     missions: [],
+    workflows: [],
+    workflowRevisions: [],
+    executionRuns: [],
+    taskAttempts: [],
     agentRuntimeConfigs: [],
     agentRuntimeDefaults: [],
     agentRuntimeConversations: [],
@@ -954,8 +1102,16 @@ function normalizeData(raw: Partial<RoundtableData>): RoundtableData {
     handoffs: Array.isArray(raw.handoffs) ? raw.handoffs : [],
     profiles: Array.isArray(raw.profiles) ? raw.profiles : [],
     workbenchPins: Array.isArray(raw.workbenchPins) ? raw.workbenchPins : [],
-    turns: Array.isArray(raw.turns) ? raw.turns : [],
-    missions: Array.isArray(raw.missions) ? raw.missions : [],
+    turns: Array.isArray(raw.turns) ? raw.turns.map(normalizeTurn) : [],
+    missions: Array.isArray(raw.missions) ? raw.missions.map(normalizeMission) : [],
+    workflows: Array.isArray(raw.workflows) ? raw.workflows.map(normalizeWorkflow) : [],
+    workflowRevisions: Array.isArray(raw.workflowRevisions)
+      ? raw.workflowRevisions.map((revision) => normalizeWorkflowRevision(revision, raw.workflows ?? []))
+      : [],
+    executionRuns: Array.isArray(raw.executionRuns)
+      ? raw.executionRuns.map((run) => normalizeExecutionRun(run, raw.turns ?? []))
+      : [],
+    taskAttempts: Array.isArray(raw.taskAttempts) ? raw.taskAttempts : [],
     agentRuntimeConfigs: Array.isArray(raw.agentRuntimeConfigs)
       ? raw.agentRuntimeConfigs.map(normalizeRuntimeConfig)
       : [],
@@ -965,6 +1121,60 @@ function normalizeData(raw: Partial<RoundtableData>): RoundtableData {
     agentRuntimeConversations: Array.isArray(raw.agentRuntimeConversations) ? raw.agentRuntimeConversations : [],
     settings: normalizeSettings(raw.settings),
   };
+}
+
+function normalizeTurn(turn: LocalTurn): LocalTurn {
+  return {
+    ...turn,
+    workflowRevisionId: turn.workflowRevisionId ?? null,
+    activeExecutionRunId: turn.activeExecutionRunId ?? null,
+  };
+}
+
+function normalizeMission(mission: Mission): Mission {
+  return {
+    ...mission,
+    workflowRevisionId: mission.workflowRevisionId ?? null,
+    workflowContentHash: mission.workflowContentHash ?? null,
+  };
+}
+
+function normalizeWorkflow(workflow: Workflow): Workflow {
+  return {
+    ...workflow,
+    storageId: workflow.storageId ?? legacyWorkflowStorageId(workflow.ownerId, workflow.id),
+    archivedAt: workflow.archivedAt ?? null,
+  };
+}
+
+function normalizeWorkflowRevision(revision: WorkflowRevision, workflows: Workflow[]): WorkflowRevision {
+  const workflow = workflows.find((item) => item.ownerId === revision.ownerId && item.id === revision.workflowId);
+  return {
+    ...revision,
+    workflowStorageId: revision.workflowStorageId
+      ?? workflow?.storageId
+      ?? legacyWorkflowStorageId(revision.ownerId, revision.workflowId),
+  };
+}
+
+function normalizeExecutionRun(run: ExecutionRun, turns: LocalTurn[]): ExecutionRun {
+  const turn = turns.find((item) => item.id === run.turnId);
+  const planSnapshot = run.planSnapshot ?? turn?.plan ?? { summary: 'Legacy execution', tasks: [] };
+  return {
+    ...run,
+    workflowId: run.workflowId ?? turn?.workflowTemplateId ?? 'unknown',
+    workflowRevisionId: run.workflowRevisionId ?? turn?.workflowRevisionId ?? null,
+    workflowContentHash: run.workflowContentHash ?? turn?.mission?.workflowContentHash ?? '',
+    workflowSnapshot: run.workflowSnapshot ?? turn?.workflow as ExecutionRun['workflowSnapshot'],
+    planSnapshot,
+    taskSnapshots: run.taskSnapshots ?? structuredClone(planSnapshot.tasks),
+    workerFinishedAt: run.workerFinishedAt ?? null,
+  };
+}
+
+function legacyWorkflowStorageId(ownerId: string, workflowId: string): string {
+  const digest = createHash('sha256').update(JSON.stringify([ownerId, workflowId])).digest('hex').slice(0, 24);
+  return `workflow_legacy_${digest}`;
 }
 
 function normalizeRuntimeConfig(config: AgentRuntimeConfig): AgentRuntimeConfig {

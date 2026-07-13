@@ -17,7 +17,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 function UserMsg({ text }) {
   return (
-    <div className="rt-rise" style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
+    <div className="rt-rise" data-testid="mission-goal" style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
       <div style={{ maxWidth: '78%', padding: '11px 15px', borderRadius: '14px 14px 4px 14px',
         background: 'var(--accent)', color: '#fff', fontSize: 14, lineHeight: 1.5,
         boxShadow: 'var(--shadow-card)' }}>{text}</div>
@@ -817,7 +817,7 @@ function LocalResultCard({ artifacts, dispatchStatus, dispatchAdapter, dispatchS
   const riskCount = mission?.finalDelivery?.risks?.length || 0;
   const statusColor = completed ? 'var(--ok)' : dispatchStatus === 'failed' ? 'var(--bad)' : 'var(--run)';
   return (
-    <div style={{ marginTop: 12, border: '1px solid var(--border)', borderRadius: 'var(--r-card)',
+    <div data-testid="mission-delivery" style={{ marginTop: 12, border: '1px solid var(--border)', borderRadius: 'var(--r-card)',
       background: 'var(--surface)', boxShadow: 'var(--shadow-card)', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px',
         borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
@@ -1013,7 +1013,7 @@ function LocalPlanCard({ plan, intake, agents, approvalStatus, approving, approv
   const doneCount = tasks.filter((t) =>
     todoStatusFor(t, recordFor(t.id), approved, dispatchStatus) === 'completed').length;
   return (
-    <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-card)', background: 'var(--surface)',
+    <div data-testid="mission-approval-gate" style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-card)', background: 'var(--surface)',
       boxShadow: 'var(--shadow-card)', overflow: 'hidden' }}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '12px 14px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
         <Icon name="layers" size={15} style={{ color: 'var(--accent)' }} />

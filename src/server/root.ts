@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TRPCError } from '@trpc/server';
 import { polishText, suggestTasks } from './actions/ai-actions.js';
 import {
   createBreakoutRoom,
@@ -25,11 +26,11 @@ import {
   updateUserProfile,
 } from './actions/memory-actions.js';
 import {
-  deleteWorkflowTemplate,
+  archiveOwnedWorkflow,
   getMission,
   listMissions,
-  listWorkflowTemplates,
-  saveWorkflowTemplate,
+  listWorkflowTemplatesForActor,
+  saveWorkflowRevision,
 } from './actions/mission-actions.js';
 import type { WorkflowTemplate } from './types.js';
 import { listArtifactsByChat, listHandoffsByChat } from './actions/read-actions.js';
@@ -178,19 +179,34 @@ const workflowTemplateSchema = z.object({
 });
 
 const missionsRouter = createTRPCRouter({
-  templates: publicProcedure.query(() => listWorkflowTemplates()),
+  templates: protectedProcedure.query(({ ctx }) => listWorkflowTemplatesForActor(ctx.user)),
   saveTemplate: protectedProcedure
-    .input(workflowTemplateSchema)
-    .mutation(({ input }) => saveWorkflowTemplate({
-      builtin: false,
-      version: 0,
-      updatedAt: '',
-      ...input,
-    } as WorkflowTemplate)),
+    .input(z.object({
+      template: workflowTemplateSchema,
+      expectedRevision: z.number().int().nonnegative(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await saveWorkflowRevision(ctx.user, {
+          expectedRevision: input.expectedRevision,
+          template: {
+            builtin: false,
+            version: 0,
+            updatedAt: '',
+            ...input.template,
+          } as WorkflowTemplate,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'workflow_revision_conflict') {
+          throw new TRPCError({ code: 'CONFLICT', message: error.message, cause: error });
+        }
+        throw error;
+      }
+    }),
   deleteTemplate: protectedProcedure
     .input(idInput)
-    .mutation(async ({ input }) => {
-      await deleteWorkflowTemplate(input.id);
+    .mutation(async ({ ctx, input }) => {
+      await archiveOwnedWorkflow(ctx.user, input.id);
       return { ok: true };
     }),
   list: protectedProcedure

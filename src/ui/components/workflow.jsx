@@ -6,6 +6,7 @@
    ============================================================================ */
 import React from 'react';
 import { RT } from '../lib/rt';
+import { createServerWorkflowDraft, createWorkflowSaveController } from '../lib/workflow-save-controller';
 import { Avatar, Icon, alpha, tint } from './primitives';
 const { useState: useStateW, useEffect: useEffectW } = React;
 
@@ -296,7 +297,7 @@ function toServerTemplate(base, name, stages) {
   };
 }
 
-function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate, onDeleteTemplate }) {
+function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate, onDeleteTemplate, onRefreshTemplates }) {
   // Server mode: the editor reads/writes the SAME templates the orchestrator
   // plans from — edits change what actually runs. localStorage mode remains
   // for the logged-out demo scene only.
@@ -309,24 +310,44 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
   const [stages, setStages] = useStateW(() => clone(base.stages));
   const [drawer, setDrawer] = useStateW(null);
   const [saved, setSaved] = useStateW(false);
+  const [saving, setSaving] = useStateW(false);
+  const [saveError, setSaveError] = useStateW(null);
+  const [pendingServerWorkflowId, setPendingServerWorkflowId] = useStateW(null);
+  const saveController = React.useRef(null);
+  if (!saveController.current) saveController.current = createWorkflowSaveController();
   const persist = () => { try { localStorage.setItem('rt.workflows', JSON.stringify(RT.workflows)); } catch { /* ignore */ } };
   const switchWorkflow = (id) => {
     const w = allWf().find((x) => x.id === id) || base;
     setWfId(id); if (!serverMode) RT.WORKBENCH.workflowId = id;
     setWfName(w.name); setStages(clone(w.stages)); setDrawer(null); setPicker(false);
   };
-  const newWorkflow = () => {
-    const id = 'wf-user-' + Date.now();
-    const wf = { id, name: 'Untitled workflow', tag: 'Yours', builtin: false, origin: { kind: 'new' },
+  const newWorkflow = async () => {
+    const wf = serverMode ? createServerWorkflowDraft() : { id: 'wf-user-' + Date.now(), name: 'Untitled workflow', tag: 'Yours', builtin: false, origin: { kind: 'new' },
       planning: { cut: 'by_role', clarifyThreshold: 0.6, maxClarifyQuestions: 3 }, version: 1, updatedAt: new Date().toISOString(),
       stages: [
         { id: 'intake', name: 'Intake', icon: 'clip', kind: 'intake', desc: 'Capture the goal in plain language.', seats: [{ ref: { kind: 'user' } }], fixed: true, gate: { kind: 'none' } },
         { id: 's-build-' + Date.now(), name: 'Build', icon: 'code', kind: 'work', desc: 'Describe what happens here.', seats: [], gate: { kind: 'none' } },
         { id: 's-ship-' + Date.now(), name: 'Ship', icon: 'rocket', kind: 'ship', desc: 'Deploy to production.', seats: [], gate: { kind: 'user_approval' } },
       ] };
+    const id = wf.id;
     if (serverMode) {
-      onSaveTemplate?.(toServerTemplate(wf, wf.name, wf.stages));
-      setWfId(id); setWfName(wf.name); setStages(clone(wf.stages)); setDrawer(null); setPicker(false);
+      if (!onSaveTemplate || saveController.current.inFlight) return;
+      setSaving(true); setSaveError(null);
+      try {
+        await saveController.current.run({
+          payload: { template: wf, expectedRevision: 0 },
+          save: onSaveTemplate,
+          onSaved: () => {
+            setPendingServerWorkflowId(id);
+            setWfId(id); setWfName(wf.name); setStages(clone(wf.stages)); setDrawer(null); setPicker(false);
+            setSaved(true); setTimeout(() => setSaved(false), 2600);
+          },
+          onConflict: onRefreshTemplates,
+          onError: setSaveError,
+        });
+      } finally {
+        setSaving(false);
+      }
       return;
     }
     RT.workflows = [...(RT.workflows || []), wf]; persist(); switchWorkflow(id);
@@ -339,10 +360,14 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
   // client-only workflow, snap the editor onto the first real template.
   useEffectW(() => {
     if (!serverMode) return;
-    if (serverTemplates.some((w) => w.id === wfId)) return;
+    if (serverTemplates.some((w) => w.id === wfId)) {
+      if (pendingServerWorkflowId === wfId) setPendingServerWorkflowId(null);
+      return;
+    }
+    if (pendingServerWorkflowId === wfId) return;
     const first = serverTemplates[0];
     setWfId(first.id); setWfName(first.name); setStages(clone(first.stages)); setDrawer(null);
-  }, [serverMode, serverTemplates]);
+  }, [serverMode, serverTemplates, wfId, pendingServerWorkflowId]);
 
   const patchStage = (i, patch, replace) => setStages((ss) => ss.map((s, j) => (j === i ? (replace ? patch : { ...s, ...patch }) : s)));
   const editStage = (i, field, val) => patchStage(i, { [field]: val });
@@ -357,13 +382,27 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
     return n;
   });
 
-  const saveWorkflow = () => {
+  const saveWorkflow = async () => {
     if (serverMode) {
       // Same-id save = override: editing a builtin (reorder stages, change
       // seats) changes what the orchestrator runs for every future mission
       // that resolves this template — including keyword auto-select.
-      onSaveTemplate?.(toServerTemplate(base, wfName, stages));
-      setSaved(true); setTimeout(() => setSaved(false), 2600);
+      if (!onSaveTemplate || saveController.current.inFlight) return;
+      setSaving(true); setSaveError(null);
+      try {
+        await saveController.current.run({
+          payload: {
+            template: toServerTemplate(base, wfName, stages),
+            expectedRevision: base.expectedRevision ?? 0,
+          },
+          save: onSaveTemplate,
+          onSaved: () => { setSaved(true); setTimeout(() => setSaved(false), 2600); },
+          onConflict: onRefreshTemplates,
+          onError: setSaveError,
+        });
+      } finally {
+        setSaving(false);
+      }
       return;
     }
     const isUser = !base.builtin;
@@ -390,11 +429,12 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
           <div style={{ display: 'flex', gap: 8 }}>
             <a href="/agents" style={{ ...ghostBtn, textDecoration: 'none' }}><Icon name="code" size={14} /> Agent CLIs</a>
             <button onClick={onOpenTemplates} style={ghostBtn}><Icon name="layers" size={14} /> Start from template</button>
-            <button onClick={saveWorkflow} style={{ ...ghostBtn, background: saved ? 'var(--ok)' : 'var(--accent)', color: '#fff', border: 'none', fontWeight: 500 }}>
-              <Icon name="check" size={14} /> {saved ? 'Saved to gallery' : 'Save as template'}</button>
+            <button onClick={saveWorkflow} disabled={saving} style={{ ...ghostBtn, background: saved ? 'var(--ok)' : 'var(--accent)', color: '#fff', border: 'none', fontWeight: 500, opacity: saving ? 0.65 : 1 }}>
+              <Icon name="check" size={14} /> {saving ? 'Saving…' : saved ? 'Saved to gallery' : 'Save as template'}</button>
           </div>
         </div>
 
+        {saveError && <div role="alert" style={{ marginTop: 10, color: 'var(--bad)', fontSize: 12.5 }}>{saveError}</div>}
         <div style={{ position: 'relative', margin: '14px 0 22px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 12px 9px 14px',
             borderRadius: 'var(--r-card)', background: 'var(--surface-2)', border: '1px solid var(--border)', flexWrap: 'wrap' }}>
@@ -437,7 +477,7 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
                   {(RT.workflows || []).map((w) => <WfRow key={w.id} w={w} active={w.id === wfId} onPick={() => switchWorkflow(w.id)} />)}
                 </>
               )}
-              <button onClick={newWorkflow} style={{ ...menuRow, borderTop: '1px solid var(--border)', marginTop: 2, color: 'var(--accent)', fontWeight: 500 }}>
+              <button onClick={newWorkflow} disabled={saving} style={{ ...menuRow, borderTop: '1px solid var(--border)', marginTop: 2, color: 'var(--accent)', fontWeight: 500 }}>
                 <Icon name="plus" size={14} /> New workflow</button>
             </div>
           )}
