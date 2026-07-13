@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   getWorkflowRevision,
+  listWorkflowRevisions,
   saveWorkflowTemplate,
   saveWorkflowRevision,
   workflowTemplateById,
@@ -104,6 +105,16 @@ describe('owner-scoped immutable workflow revisions', () => {
     const second = await saveWorkflowRevision(alice, { template, expectedRevision: 1 });
 
     expect(second.revision.contentHash).not.toBe(first.revision.contentHash);
+  });
+
+  it('lists immutable versions newest-first for the workflow history UI', async () => {
+    const template = workflowTemplateById('wf-feature-builder');
+    const first = await saveWorkflowRevision(alice, { template, expectedRevision: 0 });
+    template.stages[2]!.desc = 'A second immutable instruction.';
+    const second = await saveWorkflowRevision(alice, { template, expectedRevision: 1 });
+
+    expect(await listWorkflowRevisions(alice, template.id)).toEqual([second.revision, first.revision]);
+    expect(await listWorkflowRevisions(bob, template.id)).toEqual([]);
   });
 
   it('pins a new turn and mission to the actor latest revision without leaking the override', async () => {

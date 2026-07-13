@@ -62,6 +62,7 @@ export type SchedulerRecord = {
 export type SchedulerRun = {
   tasks: ScheduledTask[];
   records: SchedulerRecord[];
+  paused: boolean;
 };
 
 export type RunTask = (
@@ -82,11 +83,17 @@ export type OnTaskState = (
   status: 'running' | 'completed' | 'failed' | 'blocked',
 ) => void | Promise<void>;
 
+export type OnWaveStart = (tasks: PlanTask[]) => boolean | Promise<boolean>;
+
 export type SchedulerOpts = {
   tasks: PlanTask[];
   runTask: RunTask;
   onFailure?: OnFailure | undefined;
   onTaskState?: OnTaskState | undefined;
+  onWaveStart?: OnWaveStart | undefined;
+  initialCompletedTaskIds?: string[] | undefined;
+  initialCompletedTaskOutputs?: Record<string, TaskOutput> | undefined;
+  shouldPause?: (() => boolean | Promise<boolean>) | undefined;
   maxFixRounds?: number | undefined;
   now?: (() => string) | undefined;
 };
@@ -181,15 +188,17 @@ export async function runScheduler(opts: SchedulerOpts): Promise<SchedulerRun> {
   // Working copy — we never touch opts.tasks. `state` is the live graph that can
   // grow as fixer tasks are derived.
   const state = new Map<string, ScheduledTask>();
+  const initialCompleted = new Set(opts.initialCompletedTaskIds ?? []);
   for (const task of opts.tasks) {
+    const completed = initialCompleted.has(task.id);
     state.set(task.id, {
       ...task,
       deps: [...task.deps],
-      status: 'pending',
-      output: null,
+      status: completed ? 'completed' : 'pending',
+      output: completed ? opts.initialCompletedTaskOutputs?.[task.id] ?? null : null,
       error: null,
       startedAt: null,
-      finishedAt: null,
+      finishedAt: completed ? now() : null,
     });
   }
 
@@ -234,6 +243,9 @@ export async function runScheduler(opts: SchedulerOpts): Promise<SchedulerRun> {
   // A hard ceiling on iterations guards against logic bugs (never expected to hit).
   const maxIterations = opts.tasks.length * (maxFixRounds + 2) + 16;
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+    if (await opts.shouldPause?.()) {
+      return { tasks: [...state.values()], records, paused: true };
+    }
     const all = [...state.values()];
 
     // Mark tasks whose deps failed/blocked as blocked (they can never run).
@@ -264,6 +276,10 @@ export async function runScheduler(opts: SchedulerOpts): Promise<SchedulerRun> {
       // them — that only happens on a cycle, which assertAcyclic already ruled
       // out. Bail defensively rather than spin.
       break;
+    }
+
+    if (opts.onWaveStart && !(await opts.onWaveStart(ready))) {
+      return { tasks: [...state.values()], records, paused: true };
     }
 
     // Run the wave. allSettled so a thrown runTask can't reject the whole wave
@@ -390,7 +406,7 @@ export async function runScheduler(opts: SchedulerOpts): Promise<SchedulerRun> {
     }
   }
 
-  return { tasks: [...state.values()], records };
+  return { tasks: [...state.values()], records, paused: false };
 }
 
 function errorMessage(reason: unknown): string {

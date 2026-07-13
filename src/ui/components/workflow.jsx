@@ -6,7 +6,14 @@
    ============================================================================ */
 import React from 'react';
 import { RT } from '../lib/rt';
-import { createServerWorkflowDraft, createWorkflowSaveController } from '../lib/workflow-save-controller';
+import {
+  createServerWorkflowDraft,
+  createWorkflowEditSession,
+  createWorkflowSaveController,
+  workflowEditSessionSnapshot,
+} from '../lib/workflow-save-controller';
+import { WorkflowTransfer } from './workflow-transfer';
+import { WorkflowHistory } from './workflow-history';
 import { Avatar, Icon, alpha, tint } from './primitives';
 const { useState: useStateW, useEffect: useEffectW } = React;
 
@@ -297,7 +304,7 @@ function toServerTemplate(base, name, stages) {
   };
 }
 
-function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate, onDeleteTemplate, onRefreshTemplates }) {
+function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate, onDeleteTemplate, onRefreshTemplates, workflowTransfer, workflowHistory }) {
   // Server mode: the editor reads/writes the SAME templates the orchestrator
   // plans from — edits change what actually runs. localStorage mode remains
   // for the logged-out demo scene only.
@@ -313,6 +320,9 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
   const [saving, setSaving] = useStateW(false);
   const [saveError, setSaveError] = useStateW(null);
   const [pendingServerWorkflowId, setPendingServerWorkflowId] = useStateW(null);
+  const [editSession, setEditSession] = useStateW(() => workflowEditSessionSnapshot(base));
+  const editSessionController = React.useRef(null);
+  if (!editSessionController.current) editSessionController.current = createWorkflowEditSession(base, setEditSession);
   const saveController = React.useRef(null);
   if (!saveController.current) saveController.current = createWorkflowSaveController();
   const persist = () => { try { localStorage.setItem('rt.workflows', JSON.stringify(RT.workflows)); } catch { /* ignore */ } };
@@ -320,6 +330,7 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
     const w = allWf().find((x) => x.id === id) || base;
     setWfId(id); if (!serverMode) RT.WORKBENCH.workflowId = id;
     setWfName(w.name); setStages(clone(w.stages)); setDrawer(null); setPicker(false);
+    editSessionController.current.load(w);
   };
   const newWorkflow = async () => {
     const wf = serverMode ? createServerWorkflowDraft() : { id: 'wf-user-' + Date.now(), name: 'Untitled workflow', tag: 'Yours', builtin: false, origin: { kind: 'new' },
@@ -337,9 +348,14 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
         await saveController.current.run({
           payload: { template: wf, expectedRevision: 0 },
           save: onSaveTemplate,
-          onSaved: () => {
+          onSaved: (result) => {
+            const revision = result?.revision;
+            const loaded = revision?.id
+              ? { ...clone(revision.template), expectedRevision: revision.revision, workflowRevisionId: revision.id }
+              : wf;
             setPendingServerWorkflowId(id);
-            setWfId(id); setWfName(wf.name); setStages(clone(wf.stages)); setDrawer(null); setPicker(false);
+            setWfId(id); setWfName(loaded.name); setStages(clone(loaded.stages)); setDrawer(null); setPicker(false);
+            editSessionController.current.load(loaded);
             setSaved(true); setTimeout(() => setSaved(false), 2600);
           },
           onConflict: onRefreshTemplates,
@@ -360,27 +376,50 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
   // client-only workflow, snap the editor onto the first real template.
   useEffectW(() => {
     if (!serverMode) return;
-    if (serverTemplates.some((w) => w.id === wfId)) {
+    const remote = serverTemplates.find((w) => w.id === wfId);
+    if (remote) {
+      editSessionController.current.observeRemote(remote);
       if (pendingServerWorkflowId === wfId) setPendingServerWorkflowId(null);
       return;
     }
     if (pendingServerWorkflowId === wfId) return;
     const first = serverTemplates[0];
     setWfId(first.id); setWfName(first.name); setStages(clone(first.stages)); setDrawer(null);
+    editSessionController.current.load(first);
   }, [serverMode, serverTemplates, wfId, pendingServerWorkflowId]);
 
-  const patchStage = (i, patch, replace) => setStages((ss) => ss.map((s, j) => (j === i ? (replace ? patch : { ...s, ...patch }) : s)));
+  const patchStage = (i, patch, replace) => {
+    editSessionController.current.markDirty();
+    setStages((ss) => ss.map((s, j) => (j === i ? (replace ? patch : { ...s, ...patch }) : s)));
+  };
   const editStage = (i, field, val) => patchStage(i, { [field]: val });
-  const moveStage = (i, dir) => setStages((ss) => {
-    const j = i + dir; if (j < 0 || j >= ss.length) return ss;
-    const n = [...ss]; const [m] = n.splice(i, 1); n.splice(j, 0, m); return n;
-  });
-  const removeStage = (i) => setStages((ss) => ss.filter((_, j) => j !== i));
-  const addStage = (i) => setStages((ss) => {
-    const n = [...ss];
-    n.splice(i, 0, { id: 'custom-' + Date.now(), name: 'New stage', icon: 'dot', kind: 'work', desc: 'Describe what happens here.', seats: [], gate: { kind: 'none' } });
-    return n;
-  });
+  const moveStage = (i, dir) => {
+    editSessionController.current.markDirty();
+    setStages((ss) => {
+      const j = i + dir; if (j < 0 || j >= ss.length) return ss;
+      const n = [...ss]; const [m] = n.splice(i, 1); n.splice(j, 0, m); return n;
+    });
+  };
+  const removeStage = (i) => {
+    editSessionController.current.markDirty();
+    setStages((ss) => ss.filter((_, j) => j !== i));
+  };
+  const addStage = (i) => {
+    editSessionController.current.markDirty();
+    setStages((ss) => {
+      const n = [...ss];
+      n.splice(i, 0, { id: 'custom-' + Date.now(), name: 'New stage', icon: 'dot', kind: 'work', desc: 'Describe what happens here.', seats: [], gate: { kind: 'none' } });
+      return n;
+    });
+  };
+
+  const loadRemoteRevision = () => {
+    const remote = editSession.remoteWorkflow;
+    if (!remote) return;
+    if (editSession.dirty && !window.confirm('Load the latest revision? Your unsaved workflow edits will be replaced.')) return;
+    setWfName(remote.name); setStages(clone(remote.stages)); setDrawer(null); setSaveError(null);
+    editSessionController.current.load(remote);
+  };
 
   const saveWorkflow = async () => {
     if (serverMode) {
@@ -390,13 +429,17 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
       if (!onSaveTemplate || saveController.current.inFlight) return;
       setSaving(true); setSaveError(null);
       try {
+        const pinned = editSessionController.current.state;
         await saveController.current.run({
           payload: {
-            template: toServerTemplate(base, wfName, stages),
-            expectedRevision: base.expectedRevision ?? 0,
+            template: toServerTemplate(pinned.loadedWorkflow, wfName, stages),
+            expectedRevision: pinned.expectedRevision,
           },
           save: onSaveTemplate,
-          onSaved: () => { setSaved(true); setTimeout(() => setSaved(false), 2600); },
+          onSaved: (result) => {
+            editSessionController.current.commitSaved(result);
+            setSaved(true); setTimeout(() => setSaved(false), 2600);
+          },
           onConflict: onRefreshTemplates,
           onError: setSaveError,
         });
@@ -412,6 +455,7 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
       updatedAt: new Date().toISOString(), stages: clone(stages) };
     RT.workflows = [...(RT.workflows || []).filter((w) => w.id !== id), wf];
     RT.WORKBENCH.workflowId = id; setWfId(id); persist();
+    editSessionController.current.load(wf);
     setSaved(true); setTimeout(() => setSaved(false), 2600);
   };
 
@@ -427,6 +471,11 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
             </p>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
+            <WorkflowTransfer
+              revisionId={editSession.loadedWorkflow?.builtin ? null : editSession.loadedRevisionId}
+              handlers={workflowTransfer}
+              onImported={onRefreshTemplates}
+            />
             <a href="/agents" style={{ ...ghostBtn, textDecoration: 'none' }}><Icon name="code" size={14} /> Agent CLIs</a>
             <button onClick={onOpenTemplates} style={ghostBtn}><Icon name="layers" size={14} /> Start from template</button>
             <button onClick={saveWorkflow} disabled={saving} style={{ ...ghostBtn, background: saved ? 'var(--ok)' : 'var(--accent)', color: '#fff', border: 'none', fontWeight: 500, opacity: saving ? 0.65 : 1 }}>
@@ -435,11 +484,22 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
         </div>
 
         {saveError && <div role="alert" style={{ marginTop: 10, color: 'var(--bad)', fontSize: 12.5 }}>{saveError}</div>}
+        {editSession.remoteChanged && (
+          <div role="status" style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+            padding: '9px 11px', borderRadius: 'var(--r-sm)', color: 'var(--warn)', background: alpha('var(--warn)', 10), fontSize: 12.5 }}>
+            <Icon name="replay" size={13} />
+            <span style={{ flex: 1, minWidth: 220 }}>
+              Revision {editSession.remoteExpectedRevision} is available. This editor remains pinned to Revision {editSession.expectedRevision}
+              {editSession.dirty ? ' with unsaved edits.' : '.'}
+            </span>
+            <button type="button" onClick={loadRemoteRevision} style={{ ...ghostBtn, padding: '5px 9px', color: 'var(--warn)' }}>Load latest</button>
+          </div>
+        )}
         <div style={{ position: 'relative', margin: '14px 0 22px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 12px 9px 14px',
             borderRadius: 'var(--r-card)', background: 'var(--surface-2)', border: '1px solid var(--border)', flexWrap: 'wrap' }}>
             <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--accent)', flexShrink: 0 }} />
-            <input value={wfName} onChange={(e) => setWfName(e.target.value)} title="Rename this workflow" spellCheck={false}
+            <input value={wfName} onChange={(e) => { editSessionController.current.markDirty(); setWfName(e.target.value); }} title="Rename this workflow" spellCheck={false}
               onFocus={(e) => (e.currentTarget.style.borderColor = 'var(--border)')} onBlur={(e) => (e.currentTarget.style.borderColor = 'transparent')}
               style={{ font: 'inherit', fontSize: 13.5, fontWeight: 600, color: 'var(--text)', background: 'transparent', border: '1px solid transparent',
                 borderRadius: 6, outline: 'none', padding: '2px 6px', margin: '-2px 0', minWidth: 90, maxWidth: 260 }} />
@@ -499,6 +559,13 @@ function WorkflowView({ agents, onOpenTemplates, serverTemplates, onSaveTemplate
             </React.Fragment>
           ))}
         </div>
+
+        <WorkflowHistory
+          workflowId={editSession.workflowId}
+          revisionId={editSession.loadedRevisionId}
+          enabled={serverMode && !editSession.loadedWorkflow?.builtin && Boolean(workflowHistory)}
+          handlers={workflowHistory}
+        />
 
         <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-faint)', display: 'flex', alignItems: 'center', gap: 7 }}>
           <Icon name="sparkle" size={13} />

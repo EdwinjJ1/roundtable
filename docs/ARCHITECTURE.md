@@ -103,6 +103,10 @@ workspace paths are ignored in production unless explicitly enabled.
 
 Hosted deployments may provide a demo, collaboration UI, or persisted metadata,
 but must not imply that a remote server has access to the user's local runtime.
+The current beta supports one trusted operator per deployment: runtime command,
+environment, and default configuration are host-scoped, not tenant-scoped.
+Authentication and owner-scoped workflow data must not be presented as runtime
+credential isolation for mutually untrusted hosted users.
 Any future hosted product that performs local work requires an authenticated
 local bridge or desktop service with explicit, scoped capability grants.
 

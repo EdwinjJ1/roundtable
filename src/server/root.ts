@@ -29,9 +29,24 @@ import {
   archiveOwnedWorkflow,
   getMission,
   listMissions,
+  listWorkflowRevisions,
   listWorkflowTemplatesForActor,
   saveWorkflowRevision,
+  WorkflowTemplateError,
 } from './actions/mission-actions.js';
+import {
+  exportWorkflowRevisionFile,
+  importWorkflowFile,
+  preflightWorkflowFile,
+  WorkflowPortabilityError,
+} from './actions/workflow-portability-actions.js';
+import { ExecutionActionError, listExecutionRuns } from './actions/execution-actions.js';
+import {
+  requestExecutionPause,
+  requestTaskRetry,
+  resumeExecutionRun,
+} from './actions/execution-control-actions.js';
+import { ActionError } from './actions/turns/errors.js';
 import type { WorkflowTemplate } from './types.js';
 import { listArtifactsByChat, listHandoffsByChat } from './actions/read-actions.js';
 import { createWorkbench, listWorkbenches } from './actions/workbench-actions.js';
@@ -209,6 +224,64 @@ const missionsRouter = createTRPCRouter({
       await archiveOwnedWorkflow(ctx.user, input.id);
       return { ok: true };
     }),
+  exportRevision: protectedProcedure
+    .input(z.object({ revisionId: z.string().min(1) }))
+    .query(async ({ ctx, input }) => {
+      const exported = await callWorkflowPortability(() => exportWorkflowRevisionFile(ctx.user, input.revisionId));
+      return { fileName: exported.fileName, document: exported.file };
+    }),
+  previewImport: protectedProcedure
+    .input(z.object({ document: z.unknown() }))
+    .mutation(({ ctx, input }) => callWorkflowPortability(() => preflightWorkflowFile(ctx.user, input.document))),
+  importDocument: protectedProcedure
+    .input(z.object({
+      document: z.unknown(),
+      confirmedContentHash: z.string().min(1).max(128),
+    }))
+    .mutation(({ ctx, input }) => callWorkflowPortability(() => importWorkflowFile(ctx.user, {
+      input: input.document,
+      confirmedContentHash: input.confirmedContentHash,
+    }))),
+  revisions: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1) }))
+    .query(({ ctx, input }) => listWorkflowRevisions(ctx.user, input.workflowId)),
+  runs: protectedProcedure
+    .input(z.object({
+      workflowId: z.string().min(1).optional(),
+      missionId: z.string().min(1).optional(),
+      turnId: z.string().min(1).optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+    }).optional())
+    .query(async ({ ctx, input }) => (await listExecutionRuns(ctx.user, input ?? {})).map(({ run, attempts }) => ({
+      run: {
+        id: run.id,
+        status: run.status,
+        workflowRevisionId: run.workflowRevisionId,
+        staleTaskIds: run.staleTaskIds,
+        taskSnapshots: run.taskSnapshots.map((task) => ({
+          id: task.id,
+          title: task.title,
+          stageId: task.stageId ?? null,
+        })),
+        createdAt: run.createdAt,
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt,
+      },
+      attempts: attempts.map((attempt) => ({
+        id: attempt.id,
+        taskId: attempt.taskId,
+        attempt: attempt.attempt,
+        status: attempt.status,
+        runtime: attempt.runtime,
+        model: attempt.model,
+        tokens: attempt.tokens,
+        cost: attempt.cost,
+        durationMs: attempt.durationMs,
+        startedAt: attempt.startedAt,
+        finishedAt: attempt.finishedAt,
+        error: attempt.error,
+      })),
+    }))),
   list: protectedProcedure
     .input(z.object({ chatId: z.string().min(1).optional() }).optional())
     .query(({ ctx, input }) => listMissions(ctx.user, input?.chatId)),
@@ -216,6 +289,16 @@ const missionsRouter = createTRPCRouter({
     .input(idInput)
     .query(({ ctx, input }) => getMission(ctx.user, input.id)),
 });
+
+async function callWorkflowPortability<T>(action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (!(error instanceof WorkflowPortabilityError) && !(error instanceof WorkflowTemplateError)) throw error;
+    const code = error.status === 404 ? 'NOT_FOUND' : error.status === 409 ? 'CONFLICT' : 'BAD_REQUEST';
+    throw new TRPCError({ code, message: error.message, cause: error });
+  }
+}
 
 const aiRouter = createTRPCRouter({
   // Public: the local (unauthenticated) build flow uses Polish too, so it must
@@ -228,12 +311,44 @@ const aiRouter = createTRPCRouter({
     .query(({ ctx, input }) => suggestTasks(ctx.user, input?.context)),
 });
 
+const executionRouter = createTRPCRouter({
+  pause: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(({ ctx, input }) => callExecutionControl(() => requestExecutionPause(ctx.user, input.runId))),
+  resume: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), agentAdapter: z.string().min(1).optional() }))
+    .mutation(({ ctx, input }) => callExecutionControl(() => resumeExecutionRun({
+      actor: ctx.user,
+      runId: input.runId,
+      agentAdapter: input.agentAdapter,
+    }))),
+  retryTask: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), taskId: z.string().min(1) }))
+    .mutation(({ ctx, input }) => callExecutionControl(() => requestTaskRetry(ctx.user, input.runId, input.taskId))),
+});
+
+async function callExecutionControl<T>(action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (!(error instanceof ExecutionActionError) && !(error instanceof ActionError)) throw error;
+    const status = error.status;
+    const code = status === 404 ? 'NOT_FOUND' : status === 409 ? 'CONFLICT' : 'BAD_REQUEST';
+    throw new TRPCError({
+      code,
+      message: error instanceof Error ? error.message : 'execution_control_failed',
+      cause: error,
+    });
+  }
+}
+
 export const appRouter = createTRPCRouter({
   agentMemory: agentMemoryRouter,
   ai: aiRouter,
   artifacts: artifactsRouter,
   breakouts: breakoutsRouter,
   chats: chatsRouter,
+  execution: executionRouter,
   handoffs: handoffsRouter,
   messages: messagesRouter,
   missions: missionsRouter,

@@ -1111,7 +1111,7 @@ function normalizeData(raw: Partial<RoundtableData>): RoundtableData {
     executionRuns: Array.isArray(raw.executionRuns)
       ? raw.executionRuns.map((run) => normalizeExecutionRun(run, raw.turns ?? []))
       : [],
-    taskAttempts: Array.isArray(raw.taskAttempts) ? raw.taskAttempts : [],
+    taskAttempts: Array.isArray(raw.taskAttempts) ? raw.taskAttempts.map(normalizeTaskAttempt) : [],
     agentRuntimeConfigs: Array.isArray(raw.agentRuntimeConfigs)
       ? raw.agentRuntimeConfigs.map(normalizeRuntimeConfig)
       : [],
@@ -1154,6 +1154,8 @@ function normalizeWorkflowRevision(revision: WorkflowRevision, workflows: Workfl
     workflowStorageId: revision.workflowStorageId
       ?? workflow?.storageId
       ?? legacyWorkflowStorageId(revision.ownerId, revision.workflowId),
+    documentHash: revision.documentHash ?? null,
+    compatibility: revision.compatibility ?? null,
   };
 }
 
@@ -1168,7 +1170,24 @@ function normalizeExecutionRun(run: ExecutionRun, turns: LocalTurn[]): Execution
     workflowSnapshot: run.workflowSnapshot ?? turn?.workflow as ExecutionRun['workflowSnapshot'],
     planSnapshot,
     taskSnapshots: run.taskSnapshots ?? structuredClone(planSnapshot.tasks),
+    staleTaskIds: run.staleTaskIds ?? [],
     workerFinishedAt: run.workerFinishedAt ?? null,
+  };
+}
+
+function normalizeTaskAttempt(attempt: TaskAttempt): TaskAttempt {
+  return {
+    ...attempt,
+    model: attempt.model ?? null,
+    tokens: attempt.tokens ?? { status: 'unavailable', reason: 'provider_did_not_report_tokens' },
+    cost: attempt.cost ?? { status: 'unavailable', reason: 'provider_did_not_report_cost' },
+    durationMs: attempt.durationMs ?? (
+      attempt.startedAt && attempt.finishedAt
+        ? Math.max(0, Date.parse(attempt.finishedAt) - Date.parse(attempt.startedAt))
+        : null
+    ),
+    outputSummary: attempt.outputSummary ?? null,
+    artifactRefs: attempt.artifactRefs ?? [],
   };
 }
 

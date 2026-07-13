@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runAgentTask } from '../src/server/actions/agent-runner.js';
 import { resetData } from '../src/server/store.js';
+import { normalizeUsageEvidence } from '../src/server/actions/usage-evidence.js';
+import { unresolvedFailureRecords } from '../src/server/actions/turns/fix-loop.js';
 import {
   isReviewGateTask,
   makeFixerTask,
@@ -12,7 +14,7 @@ import {
   shouldAttemptFix,
 } from '../src/server/actions/turn-actions.js';
 import type { ScheduledTask } from '../src/server/actions/scheduler.js';
-import type { Artifact, PlanTask } from '../src/server/types.js';
+import type { Artifact, DispatchRecord, PlanTask } from '../src/server/types.js';
 
 function task(overrides: Partial<PlanTask> & { id: string }): PlanTask {
   return {
@@ -36,6 +38,25 @@ function scheduled(overrides: Partial<ScheduledTask> & { id: string }): Schedule
     ...overrides,
   };
 }
+
+describe('unresolvedFailureRecords — retry history', () => {
+  it('does not report an earlier failed attempt after the same task later completes', () => {
+    const base = {
+      taskId: 'task_build',
+      agentId: 'atlas',
+      events: [],
+      startedAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: '2026-01-01T00:00:01.000Z',
+      artifactIds: [],
+    } satisfies Omit<DispatchRecord, 'status' | 'error'>;
+    const records: DispatchRecord[] = [
+      { ...base, status: 'failed', error: 'first_attempt_failed' },
+      { ...base, status: 'completed', error: null },
+    ];
+
+    expect(unresolvedFailureRecords(records)).toEqual([]);
+  });
+});
 
 describe('isReviewGateTask — which tasks gate delivery through the fix loop', () => {
   it('gates the quality reviewer and the architect post-build check, not the design pass', () => {
@@ -258,7 +279,7 @@ describe('runAgentTask — chat model deliverable extraction', () => {
     stubModelResponses([{ content, finishReason: 'stop' }]);
   }
 
-  function stubModelResponses(turns: Array<{ content: string; finishReason: string }>): ReturnType<typeof vi.fn> {
+  function stubModelResponses(turns: Array<{ content: string; finishReason: string; usage?: Record<string, unknown> }>): ReturnType<typeof vi.fn> {
     let call = 0;
     const mock = vi.fn(async () => {
       const turn = turns[Math.min(call, turns.length - 1)]!;
@@ -266,7 +287,7 @@ describe('runAgentTask — chat model deliverable extraction', () => {
       return new Response(
         JSON.stringify({
           choices: [{ message: { content: turn.content }, finish_reason: turn.finishReason }],
-          usage: {},
+          usage: turn.usage ?? {},
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
@@ -345,7 +366,11 @@ describe('runAgentTask — chat model deliverable extraction', () => {
     // Every response is length-cut inside <head>: no <body> ever appears. The
     // task must fail (feeding the fix loop), never complete with a blank page.
     stubModelResponses([
-      { content: '<!DOCTYPE html>\n<html><head><style>.a { color: red', finishReason: 'length' },
+      {
+        content: '<!DOCTYPE html>\n<html><head><style>.a { color: red',
+        finishReason: 'length',
+        usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+      },
       { content: '; } .b { margin: 0', finishReason: 'length' },
       { content: '; } .c { padding: 0', finishReason: 'length' },
     ]);
@@ -357,6 +382,11 @@ describe('runAgentTask — chat model deliverable extraction', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.error).toBe('deliverable_not_usable');
+    expect(normalizeUsageEvidence(result.usage).tokens).toMatchObject({
+      status: 'available',
+      completeness: 'partial',
+      total: 30,
+    });
   });
 
   it('does not force organizer tools into single-page HTML artifacts', async () => {
